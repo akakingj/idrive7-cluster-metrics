@@ -24,6 +24,17 @@ function fmtTempAscii(tempC, units) {
     return asciiOnly(formatTemp(tempC, units).text);
 }
 
+function buildPreviewAlert(nowMs, startMs, units) {
+    const elapsed = Math.max(0, nowMs - startMs);
+    const step = Math.floor(elapsed / 4000) % 4;
+    const isBar = units && units.pressUnit === 'bar';
+    const isF = units && units.tempUnit === 'F';
+    if (step === 0) return { id: 'tpms', severity: 'amber', label: isBar ? 'FL 1.9b' : 'FL 27psi' };
+    if (step === 1) return { id: 'tpms', severity: 'red', label: isBar ? 'FL 1.4b' : 'FL 21psi' };
+    if (step === 2) return { id: 'gbox', severity: 'amber', label: isF ? 'GBX 226\u00B0F' : 'GBX 108\u00B0C' };
+    return { id: 'v12', severity: 'red', label: '12V 11.5V' };
+}
+
 function createBackgroundRuntime(bg) {
     const { settings, log } = bg;
 
@@ -58,11 +69,25 @@ function createBackgroundRuntime(bg) {
         profileEval,
         renderer,
         diagVisible: false,
+        alertPreviewStartMs: 0,
+        alertPreviewUntilMs: 0,
         onUiTick: null,
+        toggleAlertPreview(nowMs) {
+            const now = typeof nowMs === 'number' ? nowMs : Date.now();
+            if (state.alertPreviewUntilMs > now) {
+                state.alertPreviewUntilMs = 0;
+                state.alertPreviewStartMs = 0;
+                return false;
+            }
+            state.alertPreviewStartMs = now;
+            state.alertPreviewUntilMs = now + 16000;
+            return true;
+        },
         computeModel(nowMs) {
-            const telemetry = hub.snapshot(nowMs);
+            const now = typeof nowMs === 'number' ? nowMs : Date.now();
+            const telemetry = hub.snapshot(now);
             const units = hub.resolvedUnits();
-            const profile = profileEval.evaluate(telemetry, settings.values, units, nowMs);
+            const profile = profileEval.evaluate(telemetry, settings.values, units, now);
             const efficiency = effTracker.update({
                 speedKmh: telemetry.speedKmh,
                 rpm: telemetry.rpm,
@@ -71,8 +96,16 @@ function createBackgroundRuntime(bg) {
                 dmeFuelLh: telemetry.dmeFuelLh,
                 injVolumeRaw: telemetry.injVolumeRaw,
                 bcFuelLPer100km: telemetry.bcFuelLPer100km,
-            }, nowMs);
-            return { telemetry, units, profile, efficiency };
+            }, now);
+            let previewAlert = null;
+            let alertPreviewRemSec = 0;
+            if (state.alertPreviewUntilMs > now) {
+                previewAlert = buildPreviewAlert(now, state.alertPreviewStartMs, units);
+                alertPreviewRemSec = Math.ceil((state.alertPreviewUntilMs - now) / 1000);
+            } else if (state.alertPreviewUntilMs > 0) {
+                state.alertPreviewUntilMs = 0;
+            }
+            return { telemetry, units, profile, efficiency, previewAlert, alertPreviewRemSec };
         },
         tick(nowMs, forceUi) {
             const now = typeof nowMs === 'number' ? nowMs : Date.now();
@@ -131,6 +164,8 @@ mgu.run({
         let lastMainUpdate = 0;
         let lastDiagUpdate = 0;
         let lastChargingActive = null;
+        let lastPanelModeVis = null;
+        let lastPreviewBtnText = '';
         const lastRowCache = Object.create(null);
 
         function setTwoRow(name, row1, row2) {
@@ -142,12 +177,39 @@ mgu.run({
             ui.cells(name, 0, { Text1stRow: r1, Text2ndRow: r2 });
         }
 
+        function syncClusterModeVisibility(force) {
+            const isPanel = (settings.get('clusterSlotMode') || 'panel_only') !== 'map_only';
+            if (!force && lastPanelModeVis === isPanel) return;
+            lastPanelModeVis = isPanel;
+            const panelOnlyComps = [
+                'SET_WIDGETMEDIA',
+                'SET_WIDGETTRIP',
+                'WIDGET_CHARGING',
+                'SET_CABINTEMPDISPLAY',
+                'SET_HVSOCGAUGE',
+            ];
+            for (let i = 0; i < panelOnlyComps.length; i++) {
+                ui.visible(panelOnlyComps[i], isPanel);
+            }
+        }
+
         function syncChargingWidgetCheckbox(model, force) {
             const active = Boolean(model && model.telemetry && model.telemetry.charging && model.telemetry.charging.active);
             if (!force && lastChargingActive === active) return;
             lastChargingActive = active;
             ui.enabled('WIDGET_CHARGING', false);
             ui.checked('WIDGET_CHARGING', active);
+        }
+
+        function syncPreviewAlertButton(model) {
+            const rem = model && model.alertPreviewRemSec ? model.alertPreviewRemSec : 0;
+            const label = rem > 0
+                ? ('Previewing ' + asciiOnly(model.previewAlert ? model.previewAlert.label : '') + ' (' + rem + 's - tap to stop)')
+                : 'Preview smart alerts (16s)';
+            if (label !== lastPreviewBtnText) {
+                lastPreviewBtnText = label;
+                ui.text('BTN_PREVIEW_ALERTS', label);
+            }
         }
 
         function updateMainSummary(model) {
@@ -295,11 +357,14 @@ mgu.run({
             const chgKw = (typeof chg.chargeKw === 'number' && isFinite(chg.chargeKw)) ? (chg.chargeKw.toFixed(1) + ' kW') : '-- kW';
             const chgAmps = chg.maxAmps ? (' (' + Math.round(chg.maxAmps) + 'A)') : '';
             const chgRem = chg.remainText ? (' (' + chg.remainText + ' left)') : '';
-            const chgAdded = (typeof chg.addedKwh === 'number' && isFinite(chg.addedKwh)) ? (' | Added: +' + chg.addedKwh.toFixed(1) + ' kWh') : '';
             const chgHvV = (typeof t.hvVolts === 'number' && isFinite(t.hvVolts)) ? (' | Pack: ' + Math.round(t.hvVolts) + 'V') : '';
+            const tzOff = typeof t.localClockOffsetMin === 'number'
+                ? (' | TZ: UTC' + (t.localClockOffsetMin >= 0 ? '+' : '') + (t.localClockOffsetMin / 60).toFixed(t.localClockOffsetMin % 60 === 0 ? 0 : 1) +
+                    (t.carClockSource ? ' (' + t.carClockSource + ')' : ''))
+                : '';
             const chgDetail = chg.active
-                ? ('Finish: ' + (chg.finishTimeText || '--:--') + chgRem + ' | Target: ' + (chg.targetSoc || 100) + '%' + chgAdded + chgHvV + ' | ' + chgKw + chgAmps)
-                : ('Plug: ' + (chg.plugConnected ? 'Connected (' + (chg.source || 'idle') + ')' : 'Unplugged') + ' | Auto widget idle');
+                ? ('Finish: ' + (chg.finishTimeText || '--:--') + chgRem + chgHvV + ' | ' + chgKw + chgAmps + tzOff)
+                : ('Plug: ' + (chg.plugConnected ? 'Connected (' + (chg.source || 'idle') + ')' : 'Unplugged') + tzOff);
             setTwoRow(
                 'DIAG_CHARGING',
                 'Plug-In Charging (' + (chg.active ? 'ACTIVE - ' + (chg.source || 'charging') : 'Inactive') + ')',
@@ -351,13 +416,14 @@ mgu.run({
                 : (t.cabinHvacMode === 'heating' ? ' [HEAT]'
                     : (t.cabinHvacMode === 'fan' ? ' [FAN]'
                         : (t.cabinHvacMode === 'off' ? ' [OFF]' : '')));
+            const rawCabinTag = typeof t.rawCabinTemp === 'number' ? (' (raw=' + t.rawCabinTemp + ')') : '';
             setTwoRow(
                 'DIAG_TEMPS',
                 'Engine, Gearbox & Cabin Temperatures',
                 'Oil: ' + fmtTempAscii(t.oilTempC, units) +
                     ' | Cool: ' + fmtTempAscii(t.coolantTempC, units) +
                     ' | GBX: ' + fmtTempAscii(t.gearboxOilC, units) +
-                    ' | Cabin: ' + fmtTempAscii(t.cabinTempC, units) + hvacTag +
+                    ' | Cabin: ' + fmtTempAscii(t.cabinTempC, units) + rawCabinTag + hvacTag +
                     ' | IAT: ' + fmtTempAscii(t.iatC, units)
             );
 
@@ -405,6 +471,8 @@ mgu.run({
             }
 
             syncChargingWidgetCheckbox(model, clusterVisible || forceUi);
+            syncClusterModeVisibility(clusterVisible || forceUi);
+            syncPreviewAlertButton(model);
 
             if ((mainVisible || forceUi) && (forceUi || now - lastMainUpdate >= 1000)) {
                 lastMainUpdate = now;
@@ -417,11 +485,18 @@ mgu.run({
         };
 
         ui.onClick('TAB_GENERAL', () => {
+            syncPreviewAlertButton(computeModel(Date.now()));
             ui.open('GENERAL');
+        });
+
+        ui.onClick('BTN_PREVIEW_ALERTS', () => {
+            runtime.toggleAlertPreview(Date.now());
+            tick(Date.now(), true);
         });
 
         ui.onClick('TAB_CLUSTER', () => {
             clusterVisible = true;
+            syncClusterModeVisibility(true);
             syncChargingWidgetCheckbox(computeModel(Date.now()), true);
             ui.open('CLUSTER');
         });
@@ -468,7 +543,10 @@ mgu.run({
                 if (shown) tick(Date.now(), true);
             } else if (name === 'CLUSTER') {
                 clusterVisible = shown;
-                if (shown) syncChargingWidgetCheckbox(computeModel(Date.now()), true);
+                if (shown) {
+                    syncClusterModeVisibility(true);
+                    syncChargingWidgetCheckbox(computeModel(Date.now()), true);
+                }
             } else if (name === 'DIAG') {
                 diagVisible = shown;
                 runtime.diagVisible = shown;

@@ -457,6 +457,8 @@ class OverlayRenderer {
         this.lastHudNavKey = '';
         this.lastHudRoadKey = '';
         this.lastRightWidgetKey = '';
+        this._wasCharging = false;
+        this._chargingBcBase = 0;
         this.lastSummary = {};
     }
 
@@ -672,9 +674,16 @@ class OverlayRenderer {
         const chg = t.charging || null;
         const isCharging = Boolean(chg && chg.active);
 
-        // Resolve active Right-Wing Widget page ('charging' locked on charge | 'media' | 'trip' | 'off')
+        // Resolve active Right-Wing Widget page: auto-opens on 'charging' when plugged in,
+        // and lets the left-stalk BC button cycle smoothly between Charging -> Media -> Trip -> Off.
         const media = t.media || null;
-        const rightWidgetPage = panelAllowed ? resolveRightWidgetPage(s, media, isCharging) : 'off';
+        const curBcStep = (media && typeof media.bcStep === 'number') ? media.bcStep
+            : (media && typeof media.bcClicks === 'number' ? media.bcClicks : 0);
+        if (isCharging && !this._wasCharging) {
+            this._chargingBcBase = curBcStep;
+        }
+        this._wasCharging = isCharging;
+        const rightWidgetPage = panelAllowed ? resolveRightWidgetPage(s, media, isCharging, this._chargingBcBase) : 'off';
 
         let hero;
         let heroCol;
@@ -779,7 +788,7 @@ class OverlayRenderer {
             };
             const lGd = this._ensureOrLocal('gear_d', Object.assign({ target: 'panel', visible: false, z: 14 }, gdRect));
             const showGearDigit = gearDisplay === 'next_to_d' && inNormalD;
-            const alertObj = s.smartAlerts !== false ? profile.alert : null;
+            const alertObj = model.previewAlert || (s.smartAlerts !== false ? profile.alert : null);
             if (showGearDigit) {
                 this._paintGearNextToD(lGd.cv, String(Math.round(t.gear)));
                 this._setVisible('gear_d', true);
@@ -879,17 +888,13 @@ class OverlayRenderer {
                 };
                 const lRw = this._ensureOrLocal('right_widget', Object.assign({ target: 'panel', visible: true, z: 11 }, rwRect));
                 if (rightWidgetPage === 'charging') {
-                    const addedKey = (chg && typeof chg.addedKwh === 'number' && isFinite(chg.addedKwh)) ? chg.addedKwh.toFixed(1) : '--';
                     const hvVKey = (typeof t.hvVolts === 'number' && isFinite(t.hvVolts)) ? Math.round(t.hvVolts) : -1;
                     const battTKey = (typeof t.battTempC === 'number' && isFinite(t.battTempC)) ? Math.round(t.battTempC) : -99;
                     const rwKey = 'C|' + [
                         chg ? chg.finishTimeText : '--:--',
                         chg ? chg.remainText : '',
-                        chg ? chg.targetSoc : 100,
                         chg && chg.plugLocked ? 1 : 0,
                         chg && chg.preconActive ? 1 : 0,
-                        chg && chg.phases ? chg.phases : 0,
-                        addedKey,
                         hvVKey,
                         battTKey,
                         units.tempUnit,
@@ -903,7 +908,7 @@ class OverlayRenderer {
                     const totKey = media && typeof media.totalSec === 'number' ? Math.floor(media.totalSec) : -1;
                     const tElapsed = media ? Math.max(0, now - (media.trackSinceMs || 0)) : 0;
                     const titleInfo = (media && media.active && media.title)
-                        ? paginateTitle(lRw.cv, media.title, 332, [30, 27, 24, 22], 22, tElapsed)
+                        ? paginateTitle(lRw.cv, media.title, 382, [40, 36, 34, 32], 32, tElapsed)
                         : null;
                     const rwKey = 'M|' + rwRect.x + ',' + rwRect.y + '|' + (media
                         ? [media.active ? 1 : 0, media.playing ? 1 : 0, media.title, media.artist, media.coverRev,
@@ -961,7 +966,7 @@ class OverlayRenderer {
             target: 'hud', klass: 'overlay', x: hudX, y: hudTopY, w: HUD_BASE.w, h: HUD_BASE.h, visible: showHud, z: 12,
         });
         if (showHud) {
-            const alertHud = s.smartAlerts !== false ? profile.alert : null;
+            const alertHud = model.previewAlert || (s.smartAlerts !== false ? profile.alert : null);
             this._paintHud(
                 lHud.cv,
                 [hudLine1, hudLine2, hudLine3],
@@ -1052,7 +1057,7 @@ class OverlayRenderer {
                 w: MAP_RIGHT_RECT.w,
                 h: MAP_RIGHT_RECT.h,
             };
-            const alertMap = s.smartAlerts !== false ? profile.alert : null;
+            const alertMap = model.previewAlert || (s.smartAlerts !== false ? profile.alert : null);
             const gearOnMapRight = gearDisplay === 'next_to_d' ? dGearText : '';
             const showMapRight = Boolean(showBrakeRail || cornerRightMode !== 'off' || gearOnMapRight || alertMap);
             const lMapRight = this._ensureOrLocal('map_right', {
@@ -1220,17 +1225,16 @@ class OverlayRenderer {
     /**
      * Re-implemented OEM-scale Right-Wing Media Playback Widget (536x516 at 1252,88):
      *   - Gauge-edge translucent album-art backdrop filling the right-wing face cleanly with zero darkened edge
-     *   - Crisp 144x144 album artwork centered at x=186 (world x=1438, y=184..328)
-     *   - Track title (Latin + CJK): downscales 30 -> 27 -> 24 -> 22px bold before paginating cleanly across segments
-     *   - Artist / Show name in clean light gray (#cbd2dc)
-     *   - Slanted BMW cyan progress bar with right-side-only time remaining (zero left timestamp)
+     *   - Crisp 144x144 album artwork centered at x=196 (world x=1448, y=164..308)
+     *   - Stock-matched large track title (Latin + CJK: 40 -> 36 -> 32 -> 28px bold) + large artist (31 -> 28 -> 25px)
+     *   - Large right-aligned remaining time (27px) above a wider slanted BMW cyan progress bar (324x12)
      */
     _paintRightMedia(cv, media, titleInfoPre, ox, oy) {
         cv.clear(COL.clear);
-        const fgCx = 186; // world x = 1438 (+42px right matching BMW stock Now Playing alignment)
+        const fgCx = 196; // world x = 1448 (matching BMW stock Now Playing visual center)
         const coverSide = COVER_SIDE; // 144
-        const coverX = fgCx - Math.round(coverSide / 2); // 114 (world x = 1366..1510)
-        const coverY = 96; // world y = 184..328
+        const coverX = fgCx - Math.round(coverSide / 2); // 124 (world x = 1376..1520)
+        const coverY = 76; // world y = 164..308
 
         const hasMedia = Boolean(media && media.active && media.title);
         const cover = hasMedia ? media.cover : null;
@@ -1240,14 +1244,14 @@ class OverlayRenderer {
                 ox: typeof ox === 'number' ? ox : 1252,
                 oy: typeof oy === 'number' ? oy : 88,
                 vx: fgCx,
-                vy: 224,
+                vy: 218,
             });
             if (bgBuf && bgBuf.length === cv.d.length) {
                 bgBuf.copy(cv.d);
             }
             blitCoverArt(cv, coverX, coverY, cover, 4);
         } else {
-            paintRadialGlow(cv, fgCx, coverY + 72, 118, [56, 178, 246], hasMedia ? 38 : 24);
+            paintRadialGlow(cv, fgCx, coverY + 72, 128, [56, 178, 246], hasMedia ? 38 : 24);
             cv.roundRect(coverX, coverY, coverSide, coverSide, 4, COL.tileBg);
             cv.strokeRoundRect(coverX, coverY, coverSide, coverSide, 4, 2, COL.tileRim);
             cv.roundRect(fgCx - 27, coverY + 82, 24, 20, 10, COL.icyBlue);
@@ -1258,40 +1262,40 @@ class OverlayRenderer {
         }
 
         if (!hasMedia) {
-            drawTextOutline(cv, 'No Media Playing', fgCx, 286, 24, COL.mediaSub, { font: 'bold', align: 'center' });
-            drawTextOutline(cv, 'Press BC for Trip Info', fgCx, 316, 17, COL.tagGray, { font: 'bold', align: 'center' });
+            drawTextOutline(cv, 'No Media Playing', fgCx, 286, 30, COL.mediaSub, { font: 'bold', align: 'center' });
+            drawTextOutline(cv, 'Press BC for Trip Info', fgCx, 324, 21, COL.tagGray, { font: 'bold', align: 'center' });
             return;
         }
 
-        const tInfo = titleInfoPre || paginateTitle(cv, media.title, 332, [30, 27, 24, 22], 22, 0);
+        const tInfo = titleInfoPre || paginateTitle(cv, media.title, 382, [40, 36, 34, 32], 32, 0);
         if (tInfo && tInfo.text) {
-            drawTextOutline(cv, tInfo.text, fgCx, 286, tInfo.size, COL.white, { font: 'bold', align: 'center' });
+            drawTextOutline(cv, tInfo.text, fgCx, 284, tInfo.size, COL.white, { font: 'bold', align: 'center' });
         }
 
         const subRaw = media.artist || media.source || '';
         if (subRaw) {
-            const aFit = fitTextLine(cv, subRaw, 328, [23, 21, 19]);
-            drawTextOutline(cv, aFit.text, fgCx, 320, aFit.size, COL.mediaSub, { font: 'bold', align: 'center' });
+            const aFit = fitTextLine(cv, subRaw, 376, [28, 26, 24]);
+            drawTextOutline(cv, aFit.text, fgCx, 326, aFit.size, COL.mediaSub, { font: 'bold', align: 'center' });
         }
 
-        const barX0 = 32; // world x = 1284
-        const barW = 296; // world x1 = 1580
+        const barX0 = 34; // world x = 1286
+        const barW = 324; // world x1 = 1610
         const barX1 = barX0 + barW;
-        const barY = 374; // world y = 462..472
-        const barH = 10;
+        const barY = 386; // world y = 474..486
+        const barH = 12;
 
         if (typeof media.totalSec === 'number' && media.totalSec > 0 && typeof media.elapsedSec === 'number') {
             const frac = clamp(media.frac || 0, 0, 1);
             const fillW = Math.max(barH + 2, Math.round(barW * frac));
             const rem = typeof media.remainSec === 'number' ? Math.max(0, media.remainSec) : Math.max(0, media.totalSec - media.elapsedSec);
             const remLabel = media.playing === false ? ('PAUSED  -' + formatDuration(rem)) : ('-' + formatDuration(rem));
-            drawTextOutline(cv, remLabel, barX1, 362, 20, media.playing === false ? COL.amber : COL.mediaTime, { font: 'bold', align: 'right' });
+            drawTextOutline(cv, remLabel, barX1, 370, 27, media.playing === false ? COL.amber : COL.mediaTime, { font: 'bold', align: 'right' });
 
             fillSlantBar(cv, barX0, barY, barW, barH, barW, COL.progTrack);
             fillSlantBar(cv, barX0, barY, barW, barH, fillW, media.playing === false ? [255, 179, 71, 255] : [69, 214, 255, 255]);
         } else {
             const liveTag = media.playing === false ? 'PAUSED' : (media.source || 'LIVE AUDIO');
-            drawTextOutline(cv, liveTag, barX1, 364, 19, media.playing === false ? COL.amber : COL.mediaTime, { font: 'bold', align: 'right' });
+            drawTextOutline(cv, liveTag, barX1, 372, 24, media.playing === false ? COL.amber : COL.mediaTime, { font: 'bold', align: 'right' });
         }
     }
 
@@ -1366,12 +1370,11 @@ class OverlayRenderer {
     }
 
     /**
-     * Right-Wing Plug-In Charging Widget (auto-locked while car is charging):
-     *   - Drops all items already shown elsewhere on BMW's charging screen (progress bar, kW/A speed, current SoC/range)
-     *   - Enlarges hero EST. FINISH clock (`68px`) + remaining duration (`25px`)
-     *   - Fills the lower deck (`ry <= 412`, world `y <= 500`, clear of stock `19 mi  21 mi` at `y = 550`)
-     *     with non-redundant charging data (`CHARGE TARGET`, `SESSION ADDED` kWh, `HV PACK` V, `BATT TEMP`),
-     *     dynamically enlarging typography if fewer sensors are awake so there are never `--` placeholders.
+     * Right-Wing Plug-In Charging Widget (auto-opens on charge, BC-cyclable to Media/Trip):
+     *   - Drops all redundant items (progress bar, kW/A speed, current SoC/range, charging target, partial session kWh)
+     *   - Ultra-legible enlarged EST. FINISH clock (`92px` / `104px`) + remaining duration (`32px` / `36px`)
+     *   - Keeps only live non-redundant HV sensors (`HV PACK` V + `BATT TEMP`) below a subtle divider (`ry <= 402`,
+     *     world `y <= 490`, leaving 60px clearance above BMW's stock `19 mi  21 mi` range text at `world y = 550`).
      */
     _paintRightCharging(cv, chg, t, units) {
         cv.clear(COL.clear);
@@ -1380,37 +1383,14 @@ class OverlayRenderer {
         const leftX = 44;
         const rightX = 364;
 
-        paintRadialGlow(cv, midX, 222, 166, [56, 178, 246], 38);
+        paintRadialGlow(cv, midX, 232, 172, [56, 178, 246], 38);
         const hdr = c.preconActive
             ? 'CHARGING  -  PRECOND'
             : (c.plugLocked ? 'CHARGING  -  LOCKED' : 'CHARGING');
-        drawTextOutline(cv, hdr, midX, 112, 19, COL.cyan, { font: 'bold', align: 'center' });
-        cv.fillRect(leftX, 126, rightX - leftX, 2, COL.divider);
+        drawTextOutline(cv, hdr, midX, 108, 20, COL.cyan, { font: 'bold', align: 'center' });
+        cv.fillRect(leftX, 122, rightX - leftX, 2, COL.divider);
 
-        drawTextOutline(cv, 'EST. FINISH', midX, 155, 16, COL.tagGray, { font: 'bold', align: 'center' });
-        const finStr = c.finishTimeText || '--:--';
-        drawTextOutline(cv, finStr, midX, 230, 74, COL.white, { font: 'num', align: 'center' });
-
-        const remLabel = c.remainText ? (c.remainText + ' remaining') : 'Plugged in';
-        drawTextOutline(cv, remLabel, midX, 268, 26, COL.icyBlue, { font: 'bold', align: 'center' });
-
-        cv.fillRect(leftX + 12, 289, rightX - leftX - 24, 1, COL.divider);
-
-        const targetPct = c.targetSoc || 100;
-        const cards = [
-            {
-                label: c.phases ? ('TARGET (' + c.phases + 'P)') : 'CHARGE TARGET',
-                val: targetPct + '%',
-                col: COL.white,
-            },
-        ];
-        if (typeof c.addedKwh === 'number' && isFinite(c.addedKwh)) {
-            cards.push({
-                label: 'SESSION ADDED',
-                val: '+' + c.addedKwh.toFixed(1) + ' kWh',
-                col: COL.cyan,
-            });
-        }
+        const cards = [];
         if (t && typeof t.hvVolts === 'number' && isFinite(t.hvVolts)) {
             cards.push({
                 label: 'HV PACK',
@@ -1427,29 +1407,30 @@ class OverlayRenderer {
             });
         }
 
-        if (cards.length === 1) {
-            drawTextOutline(cv, cards[0].label, midX, 330, 17, COL.tagBlue, { font: 'bold', align: 'center' });
-            drawTextOutline(cv, cards[0].val, midX, 382, 44, cards[0].col, { font: 'num', align: 'center' });
-        } else if (cards.length === 2) {
-            drawTextOutline(cv, cards[0].label, leftX, 330, 17, COL.tagBlue, { font: 'bold', align: 'left' });
-            drawTextOutline(cv, cards[0].val, leftX, 376, 38, cards[0].col, { font: 'num', align: 'left' });
-            drawTextOutline(cv, cards[1].label, rightX, 330, 17, COL.tagBlue, { font: 'bold', align: 'right' });
-            drawTextOutline(cv, cards[1].val, rightX, 376, 38, cards[1].col, { font: 'num', align: 'right' });
-        } else {
-            drawTextOutline(cv, cards[0].label, leftX, 319, 16, COL.tagBlue, { font: 'bold', align: 'left' });
-            drawTextOutline(cv, cards[0].val, leftX, 355, 32, cards[0].col, { font: 'num', align: 'left' });
-            drawTextOutline(cv, cards[1].label, rightX, 319, 16, COL.tagBlue, { font: 'bold', align: 'right' });
-            drawTextOutline(cv, cards[1].val, rightX, 355, 32, cards[1].col, { font: 'num', align: 'right' });
+        const finStr = c.finishTimeText || '--:--';
+        const remLabel = c.remainText ? (c.remainText + ' remaining') : 'Plugged in';
 
-            if (cards.length === 3) {
-                drawTextOutline(cv, cards[2].label, midX, 388, 16, COL.tagBlue, { font: 'bold', align: 'center' });
-                drawTextOutline(cv, cards[2].val, midX, 424, 32, cards[2].col, { font: 'num', align: 'center' });
-            } else {
-                drawTextOutline(cv, cards[2].label, leftX, 388, 16, COL.tagBlue, { font: 'bold', align: 'left' });
-                drawTextOutline(cv, cards[2].val, leftX, 424, 32, cards[2].col, { font: 'num', align: 'left' });
-                drawTextOutline(cv, cards[3].label, rightX, 388, 16, COL.tagBlue, { font: 'bold', align: 'right' });
-                drawTextOutline(cv, cards[3].val, rightX, 424, 32, cards[3].col, { font: 'num', align: 'right' });
-            }
+        if (!cards.length) {
+            drawTextOutline(cv, 'EST. FINISH', midX, 178, 20, COL.tagGray, { font: 'bold', align: 'center' });
+            drawTextOutline(cv, finStr, midX, 280, 104, COL.white, { font: 'num', align: 'center' });
+            drawTextOutline(cv, remLabel, midX, 334, 36, COL.icyBlue, { font: 'bold', align: 'center' });
+            return;
+        }
+
+        drawTextOutline(cv, 'EST. FINISH', midX, 156, 18, COL.tagGray, { font: 'bold', align: 'center' });
+        drawTextOutline(cv, finStr, midX, 248, 92, COL.white, { font: 'num', align: 'center' });
+        drawTextOutline(cv, remLabel, midX, 294, 32, COL.icyBlue, { font: 'bold', align: 'center' });
+
+        cv.fillRect(leftX + 12, 318, rightX - leftX - 24, 1, COL.divider);
+
+        if (cards.length === 1) {
+            drawTextOutline(cv, cards[0].label, midX, 356, 17, COL.tagBlue, { font: 'bold', align: 'center' });
+            drawTextOutline(cv, cards[0].val, midX, 398, 36, cards[0].col, { font: 'num', align: 'center' });
+        } else {
+            drawTextOutline(cv, cards[0].label, leftX, 356, 17, COL.tagBlue, { font: 'bold', align: 'left' });
+            drawTextOutline(cv, cards[0].val, leftX, 398, 34, cards[0].col, { font: 'num', align: 'left' });
+            drawTextOutline(cv, cards[1].label, rightX, 356, 17, COL.tagBlue, { font: 'bold', align: 'right' });
+            drawTextOutline(cv, cards[1].val, rightX, 398, 34, cards[1].col, { font: 'num', align: 'right' });
         }
     }
 

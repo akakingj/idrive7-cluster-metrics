@@ -46,6 +46,7 @@ const { ClusterRender } = require(VENDOR_FILES['./cluster_render_client']);
 const {
     SignalHub, FastKw, LeadVehicleTracker, decodeStatusBattery2, decodeCabinTemp,
     createHvacState, feedHvacClimate2, feedHvacClimateMaster, resolveHvacMode,
+    calcCarClockOffsetMin, resolveTimeZoneOffsetMin,
     computeFrictionBrake, computeChargingState, decodeDscPressure, decodeDscPedal, decodeDscRegen, flagActive,
 } = require(path.join(APP_DIR, 'signals'));
 const { NavTracker, parseHudStatusText, parseWazeHudShowing } = require(path.join(APP_DIR, 'nav_tracker'));
@@ -2063,6 +2064,64 @@ function inBox(x, y, box) {
         const cUnplugged = computeChargingState(chgRaw, { speedKmh: 0, rpm: 0, hvKw: 0, soc: 80, stage: 'P' }, 25000);
         assert.strictEqual(cUnplugged.active, false);
         assert.strictEqual(cUnplugged.addedKwh, null);
+    });
+
+    /* 20. v0.8.3: Local Timezone Finish Clock, Smoothed Charging ETA, BC Cycling While Charging, Larger Media & Alert Preview */
+    await test('v0.8.3: Local timezone Est. Finish (PST vs UTC), smoothed ETA, BC cycling while charging & alert preview', () => {
+        // A. Timezone offset from car clock (13:44 PST when UTC is 21:44 -> -480 min)
+        const utc2144 = Date.UTC(2026, 10, 19, 21, 44, 0); // Nov 19, 2026 21:44 UTC = 13:44 PST
+        assert.strictEqual(calcCarClockOffsetMin(13, 44, utc2144), -480);
+        assert.strictEqual(resolveTimeZoneOffsetMin('auto', -480, utc2144), -480);
+        assert.strictEqual(resolveTimeZoneOffsetMin('pacific', null, utc2144), -480);
+        // Daylight saving in July (PDT = UTC-7 = -420 min)
+        assert.strictEqual(resolveTimeZoneOffsetMin('pacific', null, Date.UTC(2026, 6, 15, 20, 0, 0)), -420);
+
+        // With 85 min remaining at 13:44 PST (21:44 UTC), Est. Finish MUST be 15:09 (NEVER 23:09 UTC!)
+        const tzRaw = { wirePlugged: true, plugLocked: true, lscStatus: 'active', residualMin: 85, targetSoc: 100 };
+        const tzState = computeChargingState(tzRaw, { speedKmh: 0, rpm: 0, hvKw: -2.8, soc: 63, stage: 'P', localOffsetMin: -480 }, utc2144);
+        assert.strictEqual(tzState.remainText, '1h 25m');
+        assert.strictEqual(tzState.finishTimeText, '15:09', 'Est. Finish must use car local timezone (15:09 PST, not 23:09 UTC)');
+
+        // B. Fallback ETA smoothing: brief 1-second dip from 2.8 kW -> 1.4 kW must NOT double remainMin!
+        const smRaw = { wirePlugged: true, lscStatus: 'active', targetSoc: 100 };
+        const s0 = computeChargingState(smRaw, { speedKmh: 0, rpm: 0, hvKw: -2.8, soc: 63, stage: 'P', localOffsetMin: -480 }, utc2144);
+        const s1 = computeChargingState(smRaw, { speedKmh: 0, rpm: 0, hvKw: -1.4, soc: 63, stage: 'P', localOffsetMin: -480 }, utc2144 + 1000);
+        assert(Math.abs(s1.remainMin - s0.remainMin) <= 4,
+            'brief 1s kW dip must be smoothed in ETA (s0=' + s0.remainMin + ', s1=' + s1.remainMin + ')');
+
+        // C. BC button cycles Charging -> Media -> Trip -> Off -> Charging while plugged in!
+        const r = new OverlayRenderer({ allowPanel: true });
+        const model = {
+            units: unitsMod.US_PRESET,
+            profile: { vehicleType: 'phev', engineOn: false, mode: 'ev_drive', isEv: true, isCold: false, coldCeilingRpm: null, alert: null },
+            efficiency: { evKmPerKwh: null, fuelLPer100km: null, isDfco: false },
+            telemetry: {
+                speedKmh: 0, rpm: 0, hvKw: -2.8, hvVolts: 396, battTempC: 24.0, soc: 72, soc12: 91,
+                cabinTempC: 20.0, stage: 'P', program: 'D', gear: 0,
+                media: { active: true, playing: true, title: 'Finally, a Vaccine for...', artist: 'The Daily - Subscriber Feed', elapsedSec: 120, totalSec: 723, remainSec: 603, frac: 0.17, bcStep: 5 },
+                charging: tzState,
+            },
+        };
+        const opts = { enabled: true, widgetMedia: true, widgetTrip: true };
+        r.render(model, opts, 1000);
+        assert.strictEqual(r.lastSummary.rightWidgetPage, 'charging', 'charging must auto-open on charging widget');
+        model.telemetry.media.bcStep = 6;
+        r.render(model, opts, 1200);
+        assert.strictEqual(r.lastSummary.rightWidgetPage, 'media', '1st BC click while charging must switch to media');
+        model.telemetry.media.bcStep = 7;
+        r.render(model, opts, 1400);
+        assert.strictEqual(r.lastSummary.rightWidgetPage, 'trip', '2nd BC click while charging must switch to trip');
+        model.telemetry.media.bcStep = 8;
+        r.render(model, opts, 1600);
+        assert.strictEqual(r.lastSummary.rightWidgetPage, 'off', '3rd BC click while charging must hide right widget');
+        model.telemetry.media.bcStep = 9;
+        r.render(model, opts, 1800);
+        assert.strictEqual(r.lastSummary.rightWidgetPage, 'charging', '4th BC click must cycle back to charging');
+
+        // D. Smart alert preview renders on brake_rail & HUD even while parked/charging
+        model.previewAlert = { id: 'tpms', severity: 'red', label: 'FL 21psi' };
+        r.render(model, opts, 2000);
+        assert.strictEqual(r.layers.brake_rail.visible, true, 'previewAlert must illuminate brake_rail even in Park');
     });
 
     console.log('\nAll ' + passed + ' tests passed.');

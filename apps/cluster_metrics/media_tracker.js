@@ -924,10 +924,9 @@ class MediaTracker {
     }
 }
 
-function resolveRightWidgetPage(settingsObj, media, isCharging) {
-    if (isCharging) return 'charging';
+function resolveRightWidgetPage(settingsObj, media, isCharging, chargingBcBase) {
     const s = settingsObj || {};
-    if (s.rightWidgetMode && s.widgetMedia === undefined && s.widgetTrip === undefined) {
+    if (!isCharging && s.rightWidgetMode && s.widgetMedia === undefined && s.widgetTrip === undefined) {
         const legacyMode = s.rightWidgetMode;
         if (legacyMode === 'off') return 'off';
         if (legacyMode === 'media') return 'media';
@@ -936,6 +935,7 @@ function resolveRightWidgetPage(settingsObj, media, isCharging) {
     const allowMedia = s.widgetMedia !== false;
     const allowTrip = s.widgetTrip !== false;
     const enabled = [];
+    if (isCharging) enabled.push('charging');
     if (allowMedia) enabled.push('media');
     if (allowTrip) enabled.push('trip');
     if (!enabled.length) return 'off';
@@ -944,9 +944,11 @@ function resolveRightWidgetPage(settingsObj, media, isCharging) {
     const stepRaw = (media && typeof media.bcStep === 'number') ? media.bcStep
         : (media && typeof media.bcClicks === 'number' ? media.bcClicks
             : (media && media.page ? Math.max(0, PAGES.indexOf(media.page)) : 0));
-    const idx = ((stepRaw % cycle.length) + cycle.length) % cycle.length;
+    const base = (isCharging && typeof chargingBcBase === 'number' && isFinite(chargingBcBase)) ? chargingBcBase : 0;
+    const relStep = stepRaw - base;
+    const idx = ((relStep % cycle.length) + cycle.length) % cycle.length;
     const picked = cycle[idx];
-    if (idx === 0 && picked === 'media' && !(media && media.active) && enabled.indexOf('trip') >= 0) {
+    if (!isCharging && idx === 0 && picked === 'media' && !(media && media.active) && enabled.indexOf('trip') >= 0) {
         return 'trip';
     }
     return picked;

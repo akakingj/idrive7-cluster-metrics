@@ -21,6 +21,7 @@ const { MediaTracker } = require('./media_tracker');
 const IPC_STALE_MS = 3000;
 const IPC_DIR_DEFAULT = '/dev/shm/cluster-info';
 const EDRIVE_WANTED_DEFAULT = '/tmp/mgu-edrive-wanted.json';
+const EDRIVE_SHARED_DEFAULT = '/tmp/mgu-edrive.json';
 const PROBE_LOG_DEFAULT = '/tmp/cluster-metrics-probe.log';
 const PROBE_MAX_BYTES = 64 * 1024;
 const UDS_KW_KEEP_MS = 15000;
@@ -628,6 +629,90 @@ class LeadVehicleTracker {
     }
 }
 
+const TZ_DEFS = {
+    pacific:  { off: -8, dst: 'us' },
+    mountain: { off: -7, dst: 'us' },
+    arizona:  { off: -7, dst: null },
+    central:  { off: -6, dst: 'us' },
+    eastern:  { off: -5, dst: 'us' },
+    atlantic: { off: -4, dst: 'us' },
+    alaska:   { off: -9, dst: 'us' },
+    hawaii:   { off: -10, dst: null },
+    utc:      { off: 0, dst: null },
+    uk:       { off: 0, dst: 'eu' },
+    cet:      { off: 1, dst: 'eu' },
+    eet:      { off: 2, dst: 'eu' },
+    cst_cn:   { off: 8, dst: null },
+    jst:      { off: 9, dst: null },
+};
+
+function nthSundayUtc(year, month0, n) {
+    if (n > 0) {
+        const first = new Date(Date.UTC(year, month0, 1)).getUTCDay();
+        return 1 + ((7 - first) % 7) + (n - 1) * 7;
+    }
+    const lastDay = new Date(Date.UTC(year, month0 + 1, 0));
+    return lastDay.getUTCDate() - lastDay.getUTCDay();
+}
+
+function isDstActive(def, ms) {
+    if (!def || !def.dst) return false;
+    const y = new Date(ms).getUTCFullYear();
+    if (def.dst === 'eu') {
+        return ms >= Date.UTC(y, 2, nthSundayUtc(y, 2, -1), 1) &&
+            ms < Date.UTC(y, 9, nthSundayUtc(y, 9, -1), 1);
+    }
+    // US DST: 2nd Sunday of March 02:00 local -> 1st Sunday of November 02:00 local
+    const on = Date.UTC(y, 2, nthSundayUtc(y, 2, 2), 2) - def.off * 3600000;
+    const off = Date.UTC(y, 10, nthSundayUtc(y, 10, 1), 2) - (def.off + 1) * 3600000;
+    return ms >= on && ms < off;
+}
+
+/**
+ * Derive signed UTC offset (minutes, snapped to 15-min timezone increments) by comparing
+ * BMW's local clock (`AutoTime.current` or `KombiIF.timeDate`) against JS UTC time.
+ */
+function calcCarClockOffsetMin(hour, minute, nowMs) {
+    if (typeof hour !== 'number' || typeof minute !== 'number' ||
+        !isFinite(hour) || !isFinite(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+        return null;
+    }
+    const dUtc = new Date(typeof nowMs === 'number' && isFinite(nowMs) ? nowMs : Date.now());
+    const utcMin = dUtc.getUTCHours() * 60 + dUtc.getUTCMinutes();
+    const carMin = Math.floor(hour) * 60 + Math.floor(minute);
+    let diff = ((carMin - utcMin) % 1440 + 1440) % 1440;
+    if (diff > 720) diff -= 1440;
+    const snapped = Math.round(diff / 15) * 15;
+    return (snapped >= -720 && snapped <= 840) ? snapped : null;
+}
+
+/**
+ * Resolve effective local clock offset (minutes from UTC, or null to fall back to OS local Date).
+ */
+function resolveTimeZoneOffsetMin(tzSetting, carOffsetMin, nowMs) {
+    const ms = typeof nowMs === 'number' && isFinite(nowMs) ? nowMs : Date.now();
+    const key = String(tzSetting || 'auto');
+    if (key !== 'auto') {
+        const def = TZ_DEFS[key];
+        if (def) return (def.off + (isDstActive(def, ms) ? 1 : 0)) * 60;
+        const m = /^utc([+-]\d+(?:\.\d+)?)$/i.exec(key);
+        if (m) return Math.round(Number(m[1]) * 60);
+    }
+    if (typeof carOffsetMin === 'number' && isFinite(carOffsetMin) && carOffsetMin >= -720 && carOffsetMin <= 840) {
+        return Math.round(carOffsetMin);
+    }
+    return null;
+}
+
+function localHmFromMs(ms, localOffsetMin) {
+    if (typeof localOffsetMin === 'number' && isFinite(localOffsetMin)) {
+        const d = new Date(ms + localOffsetMin * 60000);
+        return { h: d.getUTCHours(), m: d.getUTCMinutes() };
+    }
+    const d = new Date(ms);
+    return { h: d.getHours(), m: d.getMinutes() };
+}
+
 /**
  * Derive PHEV/BEV plug-in charging session state, charging speed (kW / A), and estimated finish time
  * from BMW `Vehicle` + `Charging` SOME/IP signals with stationary shore-power (-kW at P, 0 mph) fallback.
@@ -641,6 +726,7 @@ function computeChargingState(raw, ctx, nowMs) {
     const hvKw = typeof c.hvKw === 'number' && isFinite(c.hvKw) ? c.hvKw : null;
     const soc = typeof c.soc === 'number' && isFinite(c.soc) ? c.soc : null;
     const stage = c.stage || null;
+    const localOffsetMin = (typeof c.localOffsetMin === 'number' && isFinite(c.localOffsetMin)) ? c.localOffsetMin : null;
 
     const notStationary = (speedKmh !== null && speedKmh >= 1.5) || stage === 'D' || stage === 'R';
     if (notStationary) {
@@ -648,6 +734,9 @@ function computeChargingState(raw, ctx, nowMs) {
         r._sessionKwh = 0;
         r._lastIntMs = 0;
         r._startSoc = null;
+        r._smoothChargeKw = null;
+        r._smoothKwMs = 0;
+        r._lastEstMin = null;
         return {
             active: false,
             plugConnected: false,
@@ -677,6 +766,9 @@ function computeChargingState(raw, ctx, nowMs) {
         r._sessionKwh = 0;
         r._lastIntMs = 0;
         r._startSoc = null;
+        r._smoothChargeKw = null;
+        r._smoothKwMs = 0;
+        r._lastEstMin = null;
     }
 
     const stationaryShoreCandidate = (stage === 'P' || !stage) && rpm < 100 && hvKw !== null && hvKw <= -0.65 && plugConnected !== false;
@@ -712,6 +804,22 @@ function computeChargingState(raw, ctx, nowMs) {
         ? Math.round(r.targetSoc) : 100;
     const chargeKw = (active && hvKw !== null && hvKw < -0.05) ? Math.abs(hvKw) : null;
 
+    // Smooth charging power (~25s EMA) for stable fallback finish-time / remaining-time estimates
+    if (active && chargeKw !== null && chargeKw >= 0.35) {
+        if (typeof r._smoothChargeKw !== 'number' || !isFinite(r._smoothChargeKw) || !r._smoothKwMs || now - r._smoothKwMs > 60000) {
+            r._smoothChargeKw = chargeKw;
+        } else {
+            const dtS = Math.max(0.05, Math.min(10, (now - r._smoothKwMs) / 1000));
+            const alpha = dtS / (25 + dtS);
+            r._smoothChargeKw += (chargeKw - r._smoothChargeKw) * alpha;
+        }
+        r._smoothKwMs = now;
+    } else if (!active) {
+        r._smoothChargeKw = null;
+        r._smoothKwMs = 0;
+        r._lastEstMin = null;
+    }
+
     // Integrate session kWh added while plugged in (and cross-check SoC rise across MGU sleep)
     if (active || plugConnected === true) {
         if (typeof r._sessionKwh !== 'number' || !isFinite(r._sessionKwh)) r._sessionKwh = 0;
@@ -739,17 +847,26 @@ function computeChargingState(raw, ctx, nowMs) {
     }
 
     if (active && remainMin === null && hasClock) {
-        const dNow = new Date(now);
-        const nowMin = dNow.getHours() * 60 + dNow.getMinutes();
+        const locNow = localHmFromMs(now, localOffsetMin);
+        const nowMin = locNow.h * 60 + locNow.m;
         let tgtMin = r.endHour * 60 + r.endMin;
         if (tgtMin + 10 < nowMin) tgtMin += 1440;
         const diff = tgtMin - nowMin;
         if (diff > 0 && diff <= 2880) remainMin = diff;
     }
 
-    if (active && remainMin === null && chargeKw !== null && chargeKw >= 0.4 && soc !== null && soc < targetSoc) {
+    const estKw = (typeof r._smoothChargeKw === 'number' && isFinite(r._smoothChargeKw) && r._smoothChargeKw >= 0.4)
+        ? r._smoothChargeKw : chargeKw;
+    if (active && remainMin === null && estKw !== null && estKw >= 0.4 && soc !== null && soc < targetSoc) {
         // Fallback estimate using G30 530e net HV pack energy (~10.8 kWh) & 96% charger-to-pack efficiency
-        const estMin = Math.round(((targetSoc - soc) / 100) * 10.8 / (chargeKw * 0.96) * 60);
+        const rawEstMin = ((targetSoc - soc) / 100) * 10.8 / (estKw * 0.96) * 60;
+        let estMin = Math.round(rawEstMin);
+        // 1-minute deadband so Est. Finish never jitters between adjacent minutes on small kW wobbles
+        if (typeof r._lastEstMin === 'number' && Math.abs(rawEstMin - r._lastEstMin) < 1.35) {
+            estMin = r._lastEstMin;
+        } else {
+            r._lastEstMin = estMin;
+        }
         if (estMin >= 1 && estMin <= 2880) remainMin = estMin;
     }
 
@@ -758,8 +875,8 @@ function computeChargingState(raw, ctx, nowMs) {
         if (hasClock) {
             finishTimeText = pad2(r.endHour) + ':' + pad2(r.endMin);
         } else if (remainMin !== null && remainMin > 0) {
-            const finDate = new Date(now + remainMin * 60000);
-            finishTimeText = pad2(finDate.getHours()) + ':' + pad2(finDate.getMinutes());
+            const finLoc = localHmFromMs(now + remainMin * 60000, localOffsetMin);
+            finishTimeText = pad2(finLoc.h) + ':' + pad2(finLoc.m);
         } else if (soc !== null && soc >= targetSoc - 0.5) {
             finishTimeText = 'FULL';
         }
@@ -1216,6 +1333,7 @@ class SignalHub {
         this.opts = opts || {};
         this.ipcDir = this.opts.ipcDir || process.env.CLUSTER_INFO_DIR || IPC_DIR_DEFAULT;
         this.edriveWantedPath = this.opts.edriveWantedPath || process.env.EDRIVE_WANTED_PATH || EDRIVE_WANTED_DEFAULT;
+        this.edriveSharedPath = this.opts.edriveSharedPath || process.env.EDRIVE_SHARED_PATH || EDRIVE_SHARED_DEFAULT;
         this.probeLogPath = this.opts.probeLogPath || process.env.CLUSTER_METRICS_PROBE_LOG || PROBE_LOG_DEFAULT;
         this.demoGen = new DemoGenerator();
         this.guess = new GearGuess();
@@ -1681,6 +1799,43 @@ class SignalHub {
             statusKombiSelection: (v) => {
                 this.mediaTracker.feedKombiSelection(v, Date.now());
             },
+            timeDateUTC: (v) => {
+                if (!v || typeof v !== 'object') return;
+                // BMW BN2020 timeDateUTC: timeZonesOffsetAutomaticallyUTC (15-min steps, 48 = UTC+0; 255 = invalid)
+                const rawTz = v.timeZonesOffsetAutomaticallyUTC;
+                if (typeof rawTz === 'number' && rawTz < 200 && this.live.carClockSource !== 'autotime' && this.live.carClockSource !== 'kombi_local') {
+                    const dstRaw = (typeof v.offsetWintertimeSummertimeUTC === 'number' && v.offsetWintertimeSummertimeUTC < 12)
+                        ? v.offsetWintertimeSummertimeUTC : 0;
+                    const offMin = (rawTz - 48) * 15 + dstRaw * 15;
+                    if (offMin >= -720 && offMin <= 840) {
+                        this.live.carClockOffsetMin = offMin;
+                        this.live.carClockSource = 'kombi_utc';
+                    }
+                }
+            },
+        });
+
+        watch('de.bmw.infotainment.KombiIF', {
+            timeDate: (v) => {
+                if (!v || typeof v !== 'object') return;
+                const off = calcCarClockOffsetMin(v.operationHour, v.operationMinute, Date.now());
+                if (off !== null) {
+                    this.live.carClockOffsetMin = off;
+                    this.live.carClockSource = 'kombi_local';
+                }
+            },
+        }, { pollMs: 60000 });
+
+        watchInst('com.harman.infotainment.systeminfrastructure.autotime.autotime.AutoTime', 'Inst1', {
+            current: (v) => {
+                const tm = v && v.time;
+                if (!tm || typeof tm !== 'object') return;
+                const off = calcCarClockOffsetMin(tm.hour, tm.minute, Date.now());
+                if (off !== null) {
+                    this.live.carClockOffsetMin = off;
+                    this.live.carClockSource = 'autotime';
+                }
+            },
         });
 
         watch('de.bmw.infotainment.vehicle.TPMS', {
@@ -2144,11 +2299,7 @@ class SignalHub {
         }
 
         let names = [];
-        try { names = fs.readdirSync(this.ipcDir); } catch (e) {
-            this.ipc.active = false;
-            this.ipc.list = [];
-            return;
-        }
+        try { names = fs.readdirSync(this.ipcDir); } catch (e) { names = []; }
         const found = [];
         let kw, soc, erange, frange, batt, brakeBar;
         for (let i = 0; i < names.length; i++) {
@@ -2165,6 +2316,22 @@ class SignalHub {
                 if (batt === undefined && j.values && j.values.battery && typeof j.values.battery.c === 'number') batt = j.values.battery.c;
                 if (brakeBar === undefined && j.brake && typeof j.brake.bar === 'number') brakeBar = j.brake.bar;
             } catch (e) { /* half-written json */ }
+        }
+        // Also accept official eDrive's /tmp/mgu-edrive.json when fresh so both apps never double-poll SME
+        if (this.edriveSharedPath && (kw === undefined || soc === undefined)) {
+            try {
+                const ed = JSON.parse(fs.readFileSync(this.edriveSharedPath, 'utf8'));
+                if (ed && typeof ed.t === 'number' && now - ed.t < IPC_STALE_MS) {
+                    const edKw = typeof ed.kwRead === 'number' && isFinite(ed.kwRead) ? ed.kwRead
+                        : (typeof ed.kw === 'number' && isFinite(ed.kw) ? ed.kw : undefined);
+                    if (kw === undefined && edKw !== undefined) kw = edKw;
+                    if (soc === undefined && typeof ed.soc === 'number' && isFinite(ed.soc)) soc = ed.soc;
+                    if (erange === undefined && typeof ed.rangeKm === 'number' && isFinite(ed.rangeKm)) erange = ed.rangeKm;
+                    if (edKw !== undefined || typeof ed.soc === 'number') {
+                        if (found.indexOf('eDrive') < 0) found.push('eDrive');
+                    }
+                }
+            } catch (e) { /* eDrive not running */ }
         }
         this.ipc.active = found.length > 0;
         this.ipc.list = found;
@@ -2250,15 +2417,27 @@ class SignalHub {
 
         const readSmePower = () => exclusive(async () => {
             const now0 = Date.now();
-            // Cache pack voltage for 5 s (or use LSCDataSink pack voltage) so nearly every fast cycle only sends 1 DID (hvI)
-            let hvV = (typeof this.live.udsHvV === 'number' && now0 - (this.live.udsHvVT || 0) < 5000)
+            // Cache pack voltage for 10 s; once an hvV DID has answered, pin it so a transient busy miss
+            // never falls through to a secondary DID (e.g. half-pack voltage) and halves the kW reading!
+            let hvV = (typeof this.live.udsHvV === 'number' && now0 - (this.live.udsHvVT || 0) < 10000)
                 ? this.live.udsHvV : null;
             if (hvV === null) {
-                const vRead = await this.readers.sme.value('hvV', fastHvVList);
+                const pinnedIdx = typeof this.uds.hvVPinned === 'number' ? this.uds.hvVPinned : null;
+                let vRead = null;
+                if (pinnedIdx !== null && fastHvVList[pinnedIdx]) {
+                    vRead = await this.readers.sme.read(fastHvVList[pinnedIdx]);
+                } else {
+                    vRead = await this.readers.sme.value('hvV', fastHvVList);
+                    if (typeof vRead === 'number' && typeof this.readers.sme.pick.hvV === 'number') {
+                        this.uds.hvVPinned = this.readers.sme.pick.hvV;
+                    }
+                }
                 if (typeof vRead === 'number') {
                     hvV = vRead;
                     this.live.udsHvV = vRead;
                     this.live.udsHvVT = Date.now();
+                } else if (typeof this.live.udsHvV === 'number' && Date.now() - (this.live.udsHvVT || 0) < 35000) {
+                    hvV = this.live.udsHvV;
                 } else if (typeof this.live.lscVolts === 'number' && Date.now() - (this.live.lscVoltsT || 0) < 60000) {
                     hvV = this.live.lscVolts;
                 }
@@ -2270,7 +2449,10 @@ class SignalHub {
                 const now = Date.now();
                 this.live.udsKw = kw;
                 this.live.udsKwT = now;
-                this.fastKw.reading(kw, now);
+                // Only train eDRIVE needle interpolator while actually moving (never while parked/charging)
+                if (this.live.stage !== 'P' && typeof this.live.speedKmh === 'number' && this.live.speedKmh >= 1.5) {
+                    this.fastKw.reading(kw, now);
+                }
                 this.uds.smeAnswered = true;
                 if (!this.lastRealSignalT) this.lastRealSignalT = now;
             }
@@ -2580,7 +2762,9 @@ class SignalHub {
 
         const l = this.live;
         const ipcFresh = this.ipc.active;
-        const fastKwVal = this.fastKw.now(now);
+        const speedKmh = l.speedKmh !== undefined ? l.speedKmh : null;
+        const isMovingForFastKw = l.stage !== 'P' && speedKmh !== null && speedKmh >= 1.5;
+        const fastKwVal = isMovingForFastKw ? this.fastKw.now(now) : null;
         const hvKw = (ipcFresh && typeof this.ipc.kw === 'number') ? this.ipc.kw
             : (fastKwVal !== null ? fastKwVal
                 : (l.udsKw !== undefined && now - (l.udsKwT || 0) < UDS_KW_KEEP_MS ? l.udsKw : null));
@@ -2591,7 +2775,6 @@ class SignalHub {
             : (ipcFresh && typeof this.ipc.battery === 'number' ? this.ipc.battery : (l.udsBattC !== undefined ? l.udsBattC : null));
         const program = l.mdriveProgram || l.program || 'D';
         const gear = l.gear !== undefined ? l.gear : l.guessedGear;
-        const speedKmh = l.speedKmh !== undefined ? l.speedKmh : null;
         const gLong = l.gLong !== undefined ? l.gLong : null;
         const dscFresh = typeof this.dsc.caliperBar === 'number' && (now - (this.dsc.t || 0) < 4000 || this.dsc.caliperBar === 0);
         const onThrottle = typeof l.pedalPct === 'number' && l.pedalPct >= 4.0 && !l.absActive && l.driverBraking !== true;
@@ -2617,15 +2800,18 @@ class SignalHub {
         const hudNav = this.navTracker.snapshot(now);
         const navRouteActive = hudNav.routeActive;
         const navHasLanes = hudNav.hasLanes;
+        const tzSetting = (this.ctx.settings && this.ctx.settings.get('timeZone')) || 'auto';
+        const localClockOffsetMin = resolveTimeZoneOffsetMin(tzSetting, l.carClockOffsetMin, now);
         const charging = computeChargingState(this.chargingRaw, {
             speedKmh,
             rpm: l.rpm !== undefined ? l.rpm : 0,
             hvKw,
             soc,
             stage: l.stage || null,
+            localOffsetMin: localClockOffsetMin,
         }, now);
 
-        const hvVolts = (typeof l.udsHvV === 'number' && now - (l.udsHvVT || 0) < 20000)
+        const hvVolts = (typeof l.udsHvV === 'number' && now - (l.udsHvVT || 0) < 35000)
             ? l.udsHvV
             : ((typeof l.lscVolts === 'number' && now - (l.lscVoltsT || 0) < 120000) ? l.lscVolts : null);
 
@@ -2679,6 +2865,8 @@ class SignalHub {
             navHasLanes,
             media: this.mediaTracker.snapshot(now, false),
             charging,
+            localClockOffsetMin,
+            carClockSource: l.carClockSource || null,
             tripDistKm: l.tripDistKm !== undefined ? l.tripDistKm : null,
             tripMinutes: l.tripMinutes !== undefined ? l.tripMinutes : null,
             bcAvgSpeedKmh: l.bcAvgSpeedKmh !== undefined ? l.bcAvgSpeedKmh : null,
@@ -2736,6 +2924,7 @@ module.exports = {
     SignalHub, GearGuess, FastKw, DemoGenerator, LeadVehicleTracker,
     decodeStatusBattery2, decodeCabinTemp,
     createHvacState, feedHvacClimate2, feedHvacClimateMaster, resolveHvacMode,
+    calcCarClockOffsetMin, resolveTimeZoneOffsetMin,
     computeFrictionBrake, computeChargingState, decodeDscPressure, decodeDscPedal, decodeDscRegen,
     flagActive, gearOf, stageOf, selectionOf, programOf, driveModeOf,
 };
