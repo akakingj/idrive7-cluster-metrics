@@ -1824,6 +1824,110 @@ function inBox(x, y, box) {
         demandHub.stop();
     });
 
+    /* 18. BMW MainApp & MGU Store OAP Package Manifest + JS Entry Validation */
+    await test('OAP package manifest, RHMI XML/JSON parity, and JS entry validation (MainApp installer rules)', () => {
+        const srcDir = path.join(ROOT, 'dist', 'cluster_metrics', 'source');
+        assert(fs.existsSync(srcDir), 'dist/cluster_metrics/source must exist (run npm run build first)');
+
+        const appSpec = JSON.parse(fs.readFileSync(path.join(APP_DIR, 'app.json'), 'utf8'));
+        const pkg = JSON.parse(fs.readFileSync(path.join(srcDir, 'package.json'), 'utf8'));
+
+        // MainApp package.json manifest schema & JS entry point requirements
+        assert.strictEqual(pkg.name, 'cluster_metrics');
+        assert.strictEqual(pkg.version, appSpec.version);
+        assert(/^\d+\.\d+\.\d+$/.test(pkg.version), 'package.json version must be strict x.y.z semver');
+        assert.strictEqual(pkg.main, 'javascript/app.js', 'package.json MUST declare main: "javascript/app.js" for MainApp');
+        assert(fs.statSync(path.join(srcDir, pkg.main)).isFile(), 'package.json main entry file must exist in package');
+        assert.strictEqual(pkg.private, false, 'package.json must set private: false');
+        assert(typeof pkg.author === 'string' && pkg.author.length > 0, 'package.json must carry string author');
+        assert(typeof pkg.license === 'string' && pkg.license.length > 0, 'package.json must carry string license');
+        assert(pkg.engines && typeof pkg.engines.node === 'string', 'package.json must carry engines.node');
+        assert.strictEqual(pkg.mguAppStartType, 'autostart', 'cluster_metrics must declare mguAppStartType: "autostart"');
+        assert.deepStrictEqual(pkg.mguHmi, ['ID7']);
+
+        const oap = pkg.oapAppSettings;
+        assert(oap && typeof oap === 'object', 'oapAppSettings must be present');
+        assert.strictEqual(oap.someipManifest, 'manifest.json');
+        assert(/^[A-Z0-9]{4}$/.test(oap.loggingId), 'oapAppSettings.loggingId must be 4 uppercase chars');
+
+        // permissions.json & npm-shrinkwrap.json
+        const perms = JSON.parse(fs.readFileSync(path.join(srcDir, 'permissions.json'), 'utf8'));
+        assert(Array.isArray(perms.masterAccessTable) && Array.isArray(perms.masterRegistrationTable),
+            'permissions.json must define masterAccessTable and masterRegistrationTable');
+        const shrink = JSON.parse(fs.readFileSync(path.join(srcDir, 'npm-shrinkwrap.json'), 'utf8'));
+        assert.strictEqual(shrink.name, pkg.name);
+        assert.strictEqual(shrink.version, pkg.version);
+
+        // SOME/IP manifest.json (+ local G30 interface catalog check when available)
+        const manifest = JSON.parse(fs.readFileSync(path.join(srcDir, 'manifest.json'), 'utf8'));
+        assert(manifest.proxies && typeof manifest.proxies === 'object');
+        assert(manifest.services && typeof manifest.services === 'object');
+
+        const g30CatalogPath = path.join(ROOT, 'design', 'resources', 'g30-someip-interfaces.json');
+        if (fs.existsSync(g30CatalogPath)) {
+            const rawCat = fs.readFileSync(g30CatalogPath, 'utf8');
+            const db = JSON.parse(rawCat.slice(rawCat.indexOf('{')));
+            const problems = [];
+            const members = (ifData, key, depth) => {
+                const base = ifData.extends && depth < 20 ? db.interfaces[ifData.extends] : null;
+                return Object.assign({}, base ? members(base, key, depth + 1) : {}, ifData[key]);
+            };
+            Object.keys(manifest.proxies).forEach((id) => {
+                const ifData = db.interfaces[id];
+                if (!ifData) { problems.push(id + ': missing interface'); return; }
+                const cfg = manifest.proxies[id];
+                if (cfg === '*') return;
+                const inst = cfg.instances;
+                if (inst && inst !== '*') {
+                    (Array.isArray(inst) ? inst : [inst]).forEach((n) => {
+                        if (!/\$\{userId\}/.test(n) && !(db.instanceIDs[id] && db.instanceIDs[id][n])) {
+                            problems.push(id + ': missing instance ' + n);
+                        }
+                    });
+                }
+                const fields = members(ifData, 'fields', 0);
+                Object.keys(cfg.attributes || {}).forEach((fn) => {
+                    const fd = fields[fn];
+                    if (!fd) { problems.push(id + ': missing field ' + fn); return; }
+                    const mode = String(cfg.attributes[fn]);
+                    [['r', 'getter'], ['w', 'setter'], ['s', 'notifier']].forEach((pair) => {
+                        if (mode.indexOf(pair[0]) >= 0 && !fd[pair[1]]) {
+                            problems.push(id + '.' + fn + ': missing ' + pair[1]);
+                        }
+                    });
+                });
+                const methods = members(ifData, 'methods', 0);
+                (cfg.methods || []).forEach((mn) => { if (!methods[mn]) problems.push(id + ': missing method ' + mn); });
+                const events = members(ifData, 'events', 0);
+                (cfg.broadcasts || []).forEach((bn) => { if (!events[bn]) problems.push(id + ': missing broadcast ' + bn); });
+            });
+            assert.deepStrictEqual(problems, [], 'SOME/IP manifest problems against G30 catalog: ' + problems.join('; '));
+        }
+
+        // RHMI application.xml <-> uiDescription.json parity
+        const id7Dir = path.join(srcDir, 'rhmiData', 'uiDescriptions', 'ID7');
+        const xml = fs.readFileSync(path.join(id7Dir, 'application.xml'), 'utf8');
+        const uiDesc = JSON.parse(fs.readFileSync(path.join(id7Dir, 'uiDescription.json'), 'utf8'));
+        assert.strictEqual(uiDesc.schemaVersion, '1.3.0');
+        assert(xml.indexOf('<property id="1"') < 0, 'application.xml should not emit custom property id="1" on stock widgets');
+
+        // Compile-check every packaged .js file as a CommonJS module (as oap_link.nodeCheck does)
+        const walkJs = (dir, acc) => {
+            fs.readdirSync(dir).forEach((n) => {
+                const p = path.join(dir, n);
+                if (fs.statSync(p).isDirectory()) walkJs(p, acc);
+                else if (n.endsWith('.js')) acc.push(p);
+            });
+            return acc;
+        };
+        const packagedJs = walkJs(srcDir, []);
+        assert(packagedJs.length >= 20);
+        packagedJs.forEach((f) => {
+            const text = fs.readFileSync(f, 'utf8');
+            new vm.Script(Module.wrap(text), { filename: f });
+        });
+    });
+
     console.log('\nAll ' + passed + ' tests passed.');
     process.exit(0);
 })().catch((err) => {

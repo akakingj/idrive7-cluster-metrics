@@ -24,35 +24,105 @@ function fmtTempAscii(tempC, units) {
     return asciiOnly(formatTemp(tempC, units).text);
 }
 
+function createBackgroundRuntime(bg) {
+    const { settings, log } = bg;
+
+    // Migrate legacy v0.6/v0.7.0 rightWidgetMode dropdown into widgetMedia + widgetTrip checkboxes once
+    if (settings.values && settings.values.rightWidgetMode !== undefined) {
+        const leg = settings.values.rightWidgetMode;
+        delete settings.values.rightWidgetMode;
+        if (leg === 'media') {
+            settings.set('widgetMedia', true);
+            settings.set('widgetTrip', false);
+        } else if (leg === 'trip') {
+            settings.set('widgetMedia', false);
+            settings.set('widgetTrip', true);
+        } else if (leg === 'off') {
+            settings.set('widgetMedia', false);
+            settings.set('widgetTrip', false);
+        } else {
+            settings.set('widgetMedia', true);
+            settings.set('widgetTrip', true);
+        }
+    }
+
+    const hub = new SignalHub(bg);
+    const effTracker = new EfficiencyTracker();
+    const profileEval = new VehicleProfile();
+    const renderer = new OverlayRenderer({ log });
+    let prevEnabled = settings.get('enabled') !== false;
+
+    const state = {
+        hub,
+        effTracker,
+        profileEval,
+        renderer,
+        diagVisible: false,
+        onUiTick: null,
+        computeModel(nowMs) {
+            const telemetry = hub.snapshot(nowMs);
+            const units = hub.resolvedUnits();
+            const profile = profileEval.evaluate(telemetry, settings.values, units, nowMs);
+            const efficiency = effTracker.update({
+                speedKmh: telemetry.speedKmh,
+                rpm: telemetry.rpm,
+                engineOn: profile.engineOn,
+                hvKw: telemetry.hvKw,
+                dmeFuelLh: telemetry.dmeFuelLh,
+                injVolumeRaw: telemetry.injVolumeRaw,
+                bcFuelLPer100km: telemetry.bcFuelLPer100km,
+            }, nowMs);
+            return { telemetry, units, profile, efficiency };
+        },
+        tick(nowMs, forceUi) {
+            const now = typeof nowMs === 'number' ? nowMs : Date.now();
+            const model = state.computeModel(now);
+            renderer.render(model, settings.values, now);
+            if (typeof state.onUiTick === 'function') {
+                state.onUiTick(model, now, Boolean(forceUi));
+            }
+            return model;
+        },
+        cleanup() {
+            clearInterval(timer);
+            hub.stop();
+            renderer.close();
+        },
+    };
+
+    hub.start();
+    renderer.connect();
+    hub.syncDemand(settings.values, { diagVisible: false });
+
+    settings.onChange(() => {
+        hub.syncDemand(settings.values, { diagVisible: state.diagVisible });
+        const nowEnabled = settings.get('enabled') !== false;
+        if (!prevEnabled && nowEnabled) {
+            if (hub.mediaTracker && typeof hub.mediaTracker.refresh === 'function') {
+                hub.mediaTracker.refresh();
+            }
+            hub.pollNow().then(() => state.tick(Date.now(), true)).catch(() => {});
+        }
+        prevEnabled = nowEnabled;
+        state.tick(Date.now(), true);
+    });
+
+    const timer = setInterval(() => {
+        try { state.tick(Date.now(), false); } catch (e) { log.warn('tick: ' + (e.message || e)); }
+    }, 250);
+    state.tick(Date.now(), false);
+
+    return state;
+}
+
 mgu.run({
+    async background(bg) {
+        return createBackgroundRuntime(bg);
+    },
     async start(ctx) {
         const { ui, settings, log } = ctx;
-        const hub = new SignalHub(ctx);
-        const effTracker = new EfficiencyTracker();
-        const profileEval = new VehicleProfile();
-        const renderer = new OverlayRenderer({ log });
-
-        hub.start();
-        renderer.connect();
-
-        // Migrate legacy v0.6/v0.7.0 rightWidgetMode dropdown into widgetMedia + widgetTrip checkboxes once
-        if (settings.values && settings.values.rightWidgetMode !== undefined) {
-            const leg = settings.values.rightWidgetMode;
-            delete settings.values.rightWidgetMode;
-            if (leg === 'media') {
-                settings.set('widgetMedia', true);
-                settings.set('widgetTrip', false);
-            } else if (leg === 'trip') {
-                settings.set('widgetMedia', false);
-                settings.set('widgetTrip', true);
-            } else if (leg === 'off') {
-                settings.set('widgetMedia', false);
-                settings.set('widgetTrip', false);
-            } else {
-                settings.set('widgetMedia', true);
-                settings.set('widgetTrip', true);
-            }
-        }
+        const runtime = ctx.background || createBackgroundRuntime(ctx);
+        const { hub, renderer, computeModel, tick } = runtime;
 
         let mainVisible = true;
         let clusterVisible = false;
@@ -60,7 +130,6 @@ mgu.run({
         let lastProbeActive = false;
         let lastMainUpdate = 0;
         let lastDiagUpdate = 0;
-        let prevEnabled = settings.get('enabled') !== false;
         let lastChargingActive = null;
         const lastRowCache = Object.create(null);
 
@@ -79,22 +148,6 @@ mgu.run({
             lastChargingActive = active;
             ui.enabled('WIDGET_CHARGING', false);
             ui.checked('WIDGET_CHARGING', active);
-        }
-
-        function computeModel(nowMs) {
-            const telemetry = hub.snapshot(nowMs);
-            const units = hub.resolvedUnits();
-            const profile = profileEval.evaluate(telemetry, settings.values, units, nowMs);
-            const efficiency = effTracker.update({
-                speedKmh: telemetry.speedKmh,
-                rpm: telemetry.rpm,
-                engineOn: profile.engineOn,
-                hvKw: telemetry.hvKw,
-                dmeFuelLh: telemetry.dmeFuelLh,
-                injVolumeRaw: telemetry.injVolumeRaw,
-                bcFuelLPer100km: telemetry.bcFuelLPer100km,
-            }, nowMs);
-            return { telemetry, units, profile, efficiency };
         }
 
         function updateMainSummary(model) {
@@ -335,11 +388,7 @@ mgu.run({
             );
         }
 
-        function tick(nowMs, forceUi) {
-            const now = typeof nowMs === 'number' ? nowMs : Date.now();
-            const model = computeModel(now);
-            renderer.render(model, settings.values, now);
-
+        runtime.onUiTick = (model, now, forceUi) => {
             const sum = renderer.lastSummary || {};
             const heroStr = sum.hero ? (sum.hero.value + ' ' + sum.hero.unit) : '--';
             if (process.env.CLUSTER_METRICS_BENCH === '1') {
@@ -359,7 +408,7 @@ mgu.run({
                 lastDiagUpdate = now;
                 try { updateDiagRows(model); } catch (e) { log.warn('diag update: ' + (e.message || e)); }
             }
-        }
+        };
 
         ui.onClick('TAB_GENERAL', () => {
             ui.open('GENERAL');
@@ -383,6 +432,7 @@ mgu.run({
 
         ui.onClick('BTN_DIAG', () => {
             diagVisible = true;
+            runtime.diagVisible = true;
             hub.syncDemand(settings.values, { diagVisible: true });
             tick(Date.now(), true);
             ui.open('DIAG');
@@ -415,37 +465,15 @@ mgu.run({
                 if (shown) syncChargingWidgetCheckbox(computeModel(Date.now()), true);
             } else if (name === 'DIAG') {
                 diagVisible = shown;
+                runtime.diagVisible = shown;
                 hub.syncDemand(settings.values, { diagVisible: shown });
                 if (shown) tick(Date.now(), true);
             }
         });
 
-        settings.onChange(() => {
-            hub.syncDemand(settings.values, { diagVisible });
-            const nowEnabled = settings.get('enabled') !== false;
-            if (!prevEnabled && nowEnabled) {
-                if (hub.mediaTracker && typeof hub.mediaTracker.refresh === 'function') {
-                    hub.mediaTracker.refresh();
-                }
-                hub.pollNow().then(() => tick(Date.now(), true)).catch(() => {});
-            }
-            prevEnabled = nowEnabled;
-            tick(Date.now(), true);
-        });
-
-        hub.syncDemand(settings.values, { diagVisible });
-
-        const timer = setInterval(() => {
-            try { tick(Date.now(), false); } catch (e) { log.warn('tick: ' + (e.message || e)); }
-        }, 250);
         tick(Date.now(), true);
 
-        const cleanup = () => {
-            clearInterval(timer);
-            hub.stop();
-            renderer.close();
-        };
-        ctx.stop = cleanup;
-        return cleanup;
+        ctx.stop = runtime.cleanup;
+        return runtime.cleanup;
     },
 });

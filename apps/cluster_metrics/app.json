@@ -2,7 +2,8 @@
   "id": "cluster_metrics",
   "title": "Cluster Metrics",
   "description": "Real-time efficiency, HV battery %, powertrain temperatures, gear in D, full-wing Right-Wing Media/Charging/Trip widget, HUD turn-by-turn nav, and live DSC hydraulic brake indicator for BMW iDrive 7",
-  "version": "0.8.0",
+  "version": "0.8.1",
+  "autostart": true,
   "license": "GPL-3.0-only",
   "vendor": "chyiz",
   "vendorFiles": {
@@ -274,10 +275,7 @@
         [
           "checkbox",
           "WIDGET_CHARGING",
-          "Right widget: Charging finish time (auto)",
-          {
-            "1": 0
-          }
+          "Right widget: Charging finish time (auto)"
         ],
         "gearDisplay",
         "cabinTempDisplay",
