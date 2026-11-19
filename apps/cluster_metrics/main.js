@@ -143,15 +143,21 @@ mgu.run({
             if (settings.get('widgetMedia') !== false) rwParts.push('Media');
             if (settings.get('widgetTrip') !== false) rwParts.push('Trip');
             if (sum.isCharging) rwParts.push('Charging');
+            const clusExtras = [];
+            if (settings.get('cabinTempDisplay') !== false) clusExtras.push('Cabin');
+            if (settings.get('hvSocGauge') !== false && model.profile.vehicleType === 'phev') clusExtras.push('HV%');
             const clusLine = (settings.get('clusterSlotMode') === 'map_only' ? 'Map 0x100' : 'Full Panel') +
                 '  |  Widgets: ' + (rwParts.length ? rwParts.join('+') : 'Off') +
+                (clusExtras.length ? ('  |  +' + clusExtras.join('/')) : '') +
                 '  |  Gear: ' + (settings.get('gearDisplay') || 'next_to_d');
             setTwoRow('TAB_CLUSTER', 'Cluster', clusLine);
 
+            const hwMode = settings.get('hudHeadway') || 'full';
             const hudLine = 'Nav: ' + (settings.get('hudNavMode') || 'own_nav_minimap') +
+                '  |  Headway: ' + hwMode +
                 '  |  ' + (settings.get('hudLine1') || 'efficiency_gear') +
-                ' / ' + (settings.get('hudLine2') || 'power') +
-                ' / ' + (settings.get('hudLine3') || 'brake');
+                '/' + (settings.get('hudLine2') || 'power') +
+                '/' + (settings.get('hudLine3') || 'brake');
             setTwoRow('TAB_HUD', 'HUD', hudLine);
         }
 
@@ -189,6 +195,31 @@ mgu.run({
                 'DIAG_NAV',
                 'HUD Navigation & Mini-Map Detector',
                 navDetail
+            );
+
+            const lv = t.leadVehicle || {};
+            const hwSetting = settings.get('hudHeadway') || 'full';
+            let lvDetail;
+            if (hwSetting === 'off' && !hub.activeWatchers().gapAhead) {
+                lvDetail = 'Disabled in HUD settings (GapVehicleAhead unsubscribed)';
+            } else if (lv.active && typeof lv.gapM === 'number') {
+                const distTxt = units.distUnit === 'mi'
+                    ? (Math.round(lv.gapM * 3.28084) + ' ft')
+                    : (lv.gapM.toFixed(1) + ' m');
+                const hwTxt = typeof lv.headwaySec === 'number' ? (lv.headwaySec.toFixed(2) + 's') : 'low-spd';
+                const relTxt = typeof lv.relSpeedKmh === 'number'
+                    ? ((lv.relSpeedKmh >= 0 ? '+' : '') + (units.speedUnit === 'mph' ? (lv.relSpeedKmh * 0.621371).toFixed(1) + ' mph' : lv.relSpeedKmh.toFixed(1) + ' km/h'))
+                    : '--';
+                lvDetail = 'Headway: ' + hwTxt + ' | Dist: ' + distTxt + ' | Rel: ' + relTxt +
+                    (lv.rawGapX !== null && lv.rawGapX !== undefined ? (' | gapX=' + lv.rawGapX) : '');
+            } else {
+                lvDetail = 'No lead vehicle ahead (st=' + (lv.status || 'idle') +
+                    (lv.rawGap8 !== null && lv.rawGap8 !== undefined ? ', g8=' + lv.rawGap8 : '') + ')';
+            }
+            setTwoRow(
+                'DIAG_HEADWAY',
+                'HUD Lead-Car Headway (' + (lv.active ? 'TRACKING' : 'Clear') + ' - mode: ' + hwSetting + ')',
+                lvDetail
             );
 
             const md = t.media || {};
@@ -263,10 +294,11 @@ mgu.run({
 
             setTwoRow(
                 'DIAG_TEMPS',
-                'Engine & Gearbox Temperatures',
+                'Engine, Gearbox & Cabin Temperatures',
                 'Oil: ' + fmtTempAscii(t.oilTempC, units) +
-                    ' | Coolant: ' + fmtTempAscii(t.coolantTempC, units) +
-                    ' | Gearbox: ' + fmtTempAscii(t.gearboxOilC, units) +
+                    ' | Cool: ' + fmtTempAscii(t.coolantTempC, units) +
+                    ' | GBX: ' + fmtTempAscii(t.gearboxOilC, units) +
+                    ' | Cabin: ' + fmtTempAscii(t.cabinTempC, units) +
                     ' | IAT: ' + fmtTempAscii(t.iatC, units)
             );
 
@@ -288,7 +320,10 @@ mgu.run({
                 'Gear: ' + gearDesc + ' | Brake: ' + brakeDesc
             );
 
-            const v12Str = (typeof t.v12 === 'number' && isFinite(t.v12)) ? (t.v12.toFixed(2) + 'V') : '--';
+            const v12Parts = [];
+            if (typeof t.v12 === 'number' && isFinite(t.v12)) v12Parts.push(t.v12.toFixed(2) + 'V');
+            if (typeof t.soc12 === 'number' && isFinite(t.soc12)) v12Parts.push(Math.round(t.soc12) + '%');
+            const v12Str = v12Parts.length ? v12Parts.join(' ') : '--';
             const alertStr = profile.alert ? profile.alert.label : 'Nominal';
             const srcTag = t.ipcActive ? 'IPC+UDS' : ((hub.uds && hub.uds.smeSilentSince) ? 'UDS(auto-wake)' : 'UDS');
             setTwoRow(
@@ -348,6 +383,7 @@ mgu.run({
 
         ui.onClick('BTN_DIAG', () => {
             diagVisible = true;
+            hub.syncDemand(settings.values, { diagVisible: true });
             tick(Date.now(), true);
             ui.open('DIAG');
         });
@@ -379,11 +415,13 @@ mgu.run({
                 if (shown) syncChargingWidgetCheckbox(computeModel(Date.now()), true);
             } else if (name === 'DIAG') {
                 diagVisible = shown;
+                hub.syncDemand(settings.values, { diagVisible: shown });
                 if (shown) tick(Date.now(), true);
             }
         });
 
         settings.onChange(() => {
+            hub.syncDemand(settings.values, { diagVisible });
             const nowEnabled = settings.get('enabled') !== false;
             if (!prevEnabled && nowEnabled) {
                 if (hub.mediaTracker && typeof hub.mediaTracker.refresh === 'function') {
@@ -394,6 +432,8 @@ mgu.run({
             prevEnabled = nowEnabled;
             tick(Date.now(), true);
         });
+
+        hub.syncDemand(settings.values, { diagVisible });
 
         const timer = setInterval(() => {
             try { tick(Date.now(), false); } catch (e) { log.warn('tick: ' + (e.message || e)); }

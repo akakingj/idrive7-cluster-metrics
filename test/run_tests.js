@@ -40,11 +40,12 @@ const unitsMod = require(path.join(APP_DIR, 'units'));
 const { EfficiencyTracker } = require(path.join(APP_DIR, 'efficiency'));
 const { VehicleProfile, coldRevCeilingRpm, detectAnomaly } = require(path.join(APP_DIR, 'vehicle_profile'));
 const {
-    OverlayRenderer, inspectClusterSlotConfig, resolveCornerRightMode, CLUSTER_LAYER_NAMES,
+    OverlayRenderer, inspectClusterSlotConfig, resolveCornerRightMode, formatLeadHeadwayParts, CLUSTER_LAYER_NAMES,
 } = require(path.join(APP_DIR, 'overlay_renderer'));
 const { ClusterRender } = require(VENDOR_FILES['./cluster_render_client']);
 const {
-    SignalHub, FastKw, computeFrictionBrake, computeChargingState, decodeDscPressure, decodeDscPedal, decodeDscRegen, flagActive,
+    SignalHub, FastKw, LeadVehicleTracker, decodeStatusBattery2, decodeCabinTemp,
+    computeFrictionBrake, computeChargingState, decodeDscPressure, decodeDscPedal, decodeDscRegen, flagActive,
 } = require(path.join(APP_DIR, 'signals'));
 const { NavTracker, parseHudStatusText, parseWazeHudShowing } = require(path.join(APP_DIR, 'nav_tracker'));
 const {
@@ -199,32 +200,39 @@ function inBox(x, y, box) {
         assert.strictEqual(p.engineOn, false);
         assert.strictEqual(p.mode, 'ev_drive');
 
-        const ast = { _v12LowSince: 0 };
-        assert.strictEqual(detectAnomaly({ tpms: { FL: { pressureBar: 2.4, targetBar: 2.4 } }, gearboxOilC: 85, v12: 14.1 }, unitsMod.US_PRESET, ast, 1000), null);
+        const ast = { _v12LowSince: 0, _soc12LowSince: 0 };
+        assert.strictEqual(detectAnomaly({ tpms: { FL: { pressureBar: 2.4, targetBar: 2.4 } }, gearboxOilC: 85, v12: 14.1, soc12: 84 }, unitsMod.US_PRESET, ast, 1000), null);
         const lowTire = detectAnomaly({ tpms: { FL: { pressureBar: 1.9, targetBar: 2.4 } } }, unitsMod.US_PRESET, ast, 2000);
         assert(lowTire && lowTire.id === 'tpms' && lowTire.label.indexOf('FL') === 0);
         const hotGbx = detectAnomaly({ gearboxOilC: 110 }, unitsMod.US_PRESET, ast, 3000);
         assert(hotGbx && hotGbx.id === 'gbox');
-        assert.strictEqual(detectAnomaly({ v12: 11.9 }, unitsMod.US_PRESET, ast, 4000), null);
-        const lowV12 = detectAnomaly({ v12: 11.9 }, unitsMod.US_PRESET, ast, 10000);
+        assert.strictEqual(detectAnomaly({ soc12: 48 }, unitsMod.US_PRESET, ast, 3200), null);
+        const lowSoc12 = detectAnomaly({ soc12: 48 }, unitsMod.US_PRESET, ast, 8500);
+        assert(lowSoc12 && lowSoc12.id === 'soc12' && lowSoc12.severity === 'amber' && lowSoc12.label === '12V 48%');
+        const critSoc12 = detectAnomaly({ soc12: 35 }, unitsMod.US_PRESET, ast, 9000);
+        assert(critSoc12 && critSoc12.id === 'soc12' && critSoc12.severity === 'red');
+        assert.strictEqual(detectAnomaly({ soc12: 82, v12: 11.9 }, unitsMod.US_PRESET, ast, 10000), null);
+        const lowV12 = detectAnomaly({ soc12: 82, v12: 11.9 }, unitsMod.US_PRESET, ast, 16000);
         assert(lowV12 && lowV12.id === 'v12');
     });
 
-    /* 6. Gear Digit Next to D: Clear of KOMBI4 GEAR_WIN (1380..1460) & Baseline Aligned (664..698) */
-    await test('Gear digit next to D clears KOMBI4 GEAR_WIN (1380..1460) at all nudges, aligns to D (y=664..698), and hides in S/M/P/R/N', () => {
+    /* 6. Gear Digit Snugly Next to D: Clear of KOMBI4 GEAR_WIN (1380..1426) & Baseline Aligned (664..698) */
+    await test('Gear digit sits snugly next to D (1427..1459), clears GEAR_WIN (1380..1426) & cabin_temp at all nudges, and hides in S/M/P/R/N', () => {
         const r = new OverlayRenderer({ allowPanel: true });
         const modelBase = {
             units: unitsMod.US_PRESET,
             profile: { vehicleType: 'phev', engineOn: false, mode: 'ev_drive', isEv: true, isCold: false, coldCeilingRpm: null, alert: null },
             efficiency: { evKmPerKwh: 6.1, fuelLPer100km: null, isDfco: false },
-            telemetry: { speedKmh: 72, rpm: 0, hvKw: 14.2, soc: 68, battTempC: 23.5, oilTempC: 48, coolantTempC: 73, stage: 'D', program: 'D', gear: 2 },
+            telemetry: { speedKmh: 72, rpm: 0, hvKw: 14.2, soc: 68, soc12: 86, cabinTempC: 22.0, battTempC: 23.5, oilTempC: 48, coolantTempC: 73, stage: 'D', program: 'D', gear: 2 },
         };
 
         [-12, 0, 12].forEach((nudgeX) => {
             r.render(modelBase, { enabled: true, gearDisplay: 'next_to_d', clusterNudgeX: nudgeX }, 1000);
             assert.strictEqual(r.layers.gear_d.visible, true);
             const gd = r.layers.gear_d;
-            assert(gd.rect.x >= 1461, 'gear_d layer rect must stay strictly right of GEAR_WIN (1380..1460), got x=' + gd.rect.x);
+            assert(gd.rect.x >= 1427 && gd.rect.x <= 1435, 'gear_d layer rect must sit snugly next to D (1427..1435), got x=' + gd.rect.x);
+            assert(gd.rect.x + gd.rect.w <= r.layers.cabin_temp.rect.x || !r.layers.cabin_temp.visible || gd.rect.x < r.layers.cabin_temp.rect.x,
+                'gear_d must sit strictly left of cabin_temp');
             const gdd = gd.cv.d;
             let maxR = 0, maxG = 0, maxB = 0, minWy = 999, maxWy = 0;
             for (let py = 0; py < gd.rect.h; py++) {
@@ -238,14 +246,14 @@ function inBox(x, y, box) {
                     if (gg > maxG) maxG = gg;
                     if (bb > maxB) maxB = bb;
                     const wx = gd.rect.x + px, wy = gd.rect.y + py;
-                    assert(wx >= 1461 && wx < 1540, 'gear_d pixel outside safe pocket between GEAR_WIN & AMBIENT at wx=' + wx);
+                    assert(wx >= 1427 && wx < 1460, 'gear_d pixel outside snug pocket next to D at wx=' + wx);
                     if (wy < minWy) minWy = wy;
                     if (wy > maxWy) maxWy = wy;
                 }
             }
             assert(maxR > 200 && maxG > 200 && maxB > 200, 'gear_d expected bright white text pixels');
-            assert(minWy >= 660 && minWy <= 672, 'gear_d top should align with BMW D (~665), got minWy=' + minWy);
-            assert(maxWy >= 693 && maxWy <= 700, 'gear_d bottom should align with BMW D (~696), got maxWy=' + maxWy);
+            assert(minWy >= 660 && minWy <= 674, 'gear_d top should align with BMW D (~666), got minWy=' + minWy);
+            assert(maxWy >= 692 && maxWy <= 700, 'gear_d bottom should align with BMW D (~696), got maxWy=' + maxWy);
         });
 
         modelBase.telemetry.program = 'S';
@@ -283,27 +291,27 @@ function inBox(x, y, box) {
     await test('Pixel-level hardware clearance check against HOOD, GEAR_WIN, BLACK_BOX, telltales, sub-gauges & full album art', () => {
         const scenarios = [
             {
-                name: 'EV drive D5 (idle dim brake rail + large OIL/CL + large SOC %)',
+                name: 'EV drive D5 (idle dim brake rail + large OIL/CL + HV gauge SoC + 12V % + Cabin Temp)',
                 profile: { vehicleType: 'phev', engineOn: false, mode: 'ev_drive', isEv: true, isCold: false, coldCeilingRpm: null, alert: null },
-                telemetry: { speedKmh: 108, rpm: 0, hvKw: 14.2, soc: 72, battTempC: 24, oilTempC: 48, coolantTempC: 73, stage: 'D', program: 'D', gear: 5, frictionG: 0, pureRegen: false },
+                telemetry: { speedKmh: 108, rpm: 0, hvKw: 14.2, soc: 72, soc12: 86, cabinTempC: 22.0, battTempC: 24, oilTempC: 48, coolantTempC: 73, stage: 'D', program: 'D', gear: 5, frictionG: 0, pureRegen: false },
                 efficiency: { evKmPerKwh: 6.1, fuelLPer100km: null, isDfco: false },
             },
             {
                 name: 'EV pure regen D4 (100% SoC width check + dim brake rail)',
                 profile: { vehicleType: 'phev', engineOn: false, mode: 'ev_regen', isEv: true, isCold: false, coldCeilingRpm: null, alert: null },
-                telemetry: { speedKmh: 54, rpm: 0, hvKw: -26, soc: 100, battTempC: 3, oilTempC: 46, coolantTempC: 70, stage: 'D', program: 'D', gear: 4, frictionG: 0, pureRegen: true },
+                telemetry: { speedKmh: 54, rpm: 0, hvKw: -26, soc: 100, soc12: 100, cabinTempC: 20.0, battTempC: 3, oilTempC: 46, coolantTempC: 70, stage: 'D', program: 'D', gear: 4, frictionG: 0, pureRegen: true },
                 efficiency: { evKmPerKwh: 6.1, fuelLPer100km: null, isDfco: false },
             },
             {
                 name: 'EV blended brake D3 + ABS (low SoC amber + active friction brake segments + g)',
                 profile: { vehicleType: 'phev', engineOn: false, mode: 'ev_drive', isEv: true, isCold: false, coldCeilingRpm: null, alert: null },
-                telemetry: { speedKmh: 36, rpm: 0, hvKw: -22, soc: 15, battTempC: 42, oilTempC: 54, coolantTempC: 76, stage: 'D', program: 'D', gear: 3, frictionG: 0.42, pureRegen: false, absActive: true },
+                telemetry: { speedKmh: 36, rpm: 0, hvKw: -22, soc: 15, soc12: 49, cabinTempC: 24.5, battTempC: 42, oilTempC: 54, coolantTempC: 76, stage: 'D', program: 'D', gear: 3, frictionG: 0.42, pureRegen: false, absActive: true },
                 efficiency: { evKmPerKwh: 6.1, fuelLPer100km: null, isDfco: false },
             },
             {
-                name: 'Gas cold D6 + TPMS alert (triple-digit °F OIL/CL + SOC %)',
+                name: 'Gas cold D6 + TPMS alert (triple-digit °F OIL/CL + 12V %)',
                 profile: { vehicleType: 'phev', engineOn: true, mode: 'gas_cold', isEv: false, isCold: true, coldCeilingRpm: 3800, alert: { id: 'tpms', severity: 'amber', label: 'FL 28psi' } },
-                telemetry: { speedKmh: 98, rpm: 2400, soc: 8, oilTempC: 98, coolantTempC: 96, battTempC: 25, boostBar: 0.4, stage: 'D', program: 'D', gear: 6, frictionG: 0.18, pureRegen: false },
+                telemetry: { speedKmh: 98, rpm: 2400, soc: 8, soc12: 78, cabinTempC: -8.0, oilTempC: 98, coolantTempC: 96, battTempC: 25, boostBar: 0.4, stage: 'D', program: 'D', gear: 6, frictionG: 0.18, pureRegen: false },
                 efficiency: { evKmPerKwh: 6.1, fuelLPer100km: 7.2, isDfco: false },
             },
         ];
@@ -343,7 +351,25 @@ function inBox(x, y, box) {
                 efficiency: scenarios[si].efficiency,
             }, { enabled: true, gearDisplay: 'next_to_d' }, 3000);
 
-            assert.strictEqual(r.lastSummary.cornerRightMode, 'soc', 'PHEV corner_right must default to soc (%)');
+            assert.strictEqual(r.lastSummary.cornerRightMode, 'soc12', 'corner_right must auto-select 12V % now that PHEV HV SoC overlays the HV battery gauge');
+            assert.strictEqual(r.layers.hv_soc_gauge.visible, true, 'PHEV must display hv_soc_gauge over the bottom-right HV battery gauge');
+            assert.strictEqual(r.layers.cabin_temp.visible, true, 'cabin_temp car-box badge must render left of ambient temp');
+            // Verify cabin_temp clears every keepout box (GEAR_WIN, AMBIENT_TEMP, BOTTOM_BRACKET_LINE)
+            const ctL = r.layers.cabin_temp;
+            let ctPainted = 0;
+            for (let py = 0; py < ctL.rect.h; py++) {
+                const wy = ctL.rect.y + py;
+                for (let px = 0; px < ctL.rect.w; px++) {
+                    if (ctL.cv.d[(py * ctL.rect.w + px) * 4 + 3] === 0) continue;
+                    ctPainted++;
+                    const wx = ctL.rect.x + px;
+                    for (let ki = 0; ki < keepoutBoxes.length; ki++) {
+                        assert(!inBox(wx, wy, keepoutBoxes[ki][1]),
+                            scenarios[si].name + ' cabin_temp hits ' + keepoutBoxes[ki][0] + ' at (' + wx + ',' + wy + ')');
+                    }
+                }
+            }
+            assert(ctPainted > 250, 'cabin_temp car-silhouette badge must paint frame + digits');
             assert.strictEqual(r.layers.below_speed.rect.x, 392, 'below_speed must sit shifted left at x=392 under main speed digits');
             assert.strictEqual(r.layers.below_speed.rect.y, 445, 'below_speed must sit shifted down at y=445 for balanced clearance under speed & above traffic light sign');
             assert.strictEqual(r.layers.corner_right.rect.y, 646, 'corner_right must sit shifted 3px down at y=646 away from battery icon');
@@ -489,10 +515,14 @@ function inBox(x, y, box) {
         }
         assert.strictEqual(holdTopPx, 0, 'stationary brakeHold must not show fake g text');
 
-        assert.strictEqual(resolveCornerRightMode('auto', { vehicleType: 'phev' }, {}), 'soc');
+        assert.strictEqual(resolveCornerRightMode('auto', { vehicleType: 'phev' }, { soc12: 86, soc: 68 }, true), 'soc12');
+        assert.strictEqual(resolveCornerRightMode('auto', { vehicleType: 'phev' }, { v12: 14.1, soc: 68 }, true), 'v12');
+        assert.strictEqual(resolveCornerRightMode('auto', { vehicleType: 'phev' }, { soc: 68 }, false), 'soc');
+        assert.strictEqual(resolveCornerRightMode('soc12', { vehicleType: 'ice' }, {}), 'soc12');
         assert.strictEqual(resolveCornerRightMode('soc', { vehicleType: 'phev' }, {}), 'soc');
         assert.strictEqual(resolveCornerRightMode('batt', { vehicleType: 'phev' }, {}), 'batt');
         assert.strictEqual(resolveCornerRightMode('auto', { vehicleType: 'ice' }, { iatC: 28 }), 'iat');
+        assert.strictEqual(resolveCornerRightMode('auto', { vehicleType: 'ice' }, { soc12: 82, iatC: 28 }), 'soc12');
     });
 
     /* 9. Real DidReader + SignalHub UDS Byte-Frame + FastKw + Self-Healing SME Wake Test */
@@ -676,8 +706,8 @@ function inBox(x, y, box) {
         rDefault.render(modelA, { enabled: true, gearDisplay: 'next_to_d' }, 5000);
         await wait(60);
 
-        assert.strictEqual(recorded.layers.filter((l) => l.target === 'panel').length, 6, 'default panel_only must activate all 5 outer zones + right_widget');
-        assert(rDefault.layerCount() <= 11);
+        assert.strictEqual(recorded.layers.filter((l) => l.target === 'panel').length, 7, 'default PHEV panel_only must activate 5 outer zones + hv_soc_gauge + right_widget');
+        assert(rDefault.layerCount() <= 16);
         assert(rDefault.pixelBytesTotal() < 3.5 * 1024 * 1024);
 
         const firstFrames = recorded.frames.length;
@@ -881,11 +911,11 @@ function inBox(x, y, box) {
             await wait(15);
             assert.strictEqual(hu.settings.get('hudLine3'), 'soc');
 
-            // Open native DIAG screen via BTN_DIAG and verify all diagnostic rows populate including DIAG_CHARGING
+            // Open native DIAG screen via BTN_DIAG and verify all diagnostic rows populate including DIAG_HEADWAY & DIAG_CHARGING
             hu.ui.comp('BTN_DIAG').emit('action', {});
             await wait(80);
             assert(hu.stack.includes('DIAG'), 'BTN_DIAG must open native DIAG screen');
-            ['DIAG_RENDER', 'DIAG_NAV', 'DIAG_MEDIA', 'DIAG_CHARGING', 'DIAG_BRAKE_ECU', 'DIAG_POWERTRAIN', 'DIAG_BATTERY', 'DIAG_TEMPS', 'DIAG_CHASSIS', 'DIAG_UDS'].forEach((k) => {
+            ['DIAG_RENDER', 'DIAG_NAV', 'DIAG_HEADWAY', 'DIAG_MEDIA', 'DIAG_CHARGING', 'DIAG_BRAKE_ECU', 'DIAG_POWERTRAIN', 'DIAG_BATTERY', 'DIAG_TEMPS', 'DIAG_CHASSIS', 'DIAG_UDS'].forEach((k) => {
                 assert(cellsUpdated[k] && cellsUpdated[k].Text2ndRow, 'DIAG must populate ' + k);
             });
 
@@ -934,6 +964,7 @@ function inBox(x, y, box) {
             'de.bmw.infotainment.lsc.LSCDataSink': ['statusHighVoltageStorage'],
             'de.bmw.infrastructure.VehicleCondition': ['VehicleCondition'],
             'de.bmw.body.Light': ['IndicatorSteeringColumn', 'IndicatorSteeringColumnComplete', 'StatusFunctionsIndicators'],
+            'de.bmw.dass.GapVehicleAhead': ['GapVehicleDrivingAhead', 'DataFrontVehicle', 'DataFrontVehicleExtended'],
         };
         Object.keys(EVENT_ONLY).forEach((iface) => {
             const group = sigs[iface] || {};
@@ -1639,6 +1670,158 @@ function inBox(x, y, box) {
         assert.strictEqual(r.lastSummary.isCharging, false);
         assert.strictEqual(r.lastSummary.rightWidgetPage, 'off', 'charging widget must disable automatically when not charging');
         mt.stop();
+    });
+
+    /* 17. Lead-Car Headway HUD, 12V Battery SoC %, PHEV-Only HV Gauge SoC, Cabin Temp Car-Box & On-Demand Signal Gating */
+    await test('Lead-car headway HUD, 12V SoC %, PHEV-only HV gauge SoC, cabin temp car-box, and dynamic on-demand signal teardown', async () => {
+        // A. Pure signal decoders: 12V SoC %, Cabin Temp, and LeadVehicleTracker
+        assert.strictEqual(decodeStatusBattery2({ conditionBatteryChargingCondition: 86 }), 86);
+        assert.strictEqual(decodeStatusBattery2({ conditionBatteryChargingCondition: 0 }), 0);
+        assert.strictEqual(decodeStatusBattery2({ conditionBatteryChargingCondition: 255 }), null, '255 invalid must return null');
+
+        assert.strictEqual(decodeCabinTemp({ temperatureInside: 124 }), 22.0); // 124 * 0.5 - 40 = 22.0C (72F)
+        assert.strictEqual(decodeCabinTemp({ temperatureInside: 80 }), 0.0);
+        assert.strictEqual(decodeCabinTemp({ temperatureInside: 255 }), null, '255 invalid must return null');
+
+        const lt = new LeadVehicleTracker();
+        assert.strictEqual(lt.snapshot(100, 1000).active, false);
+        // Feed DataFrontVehicle: 576 * 0.0625 = 36.0m at 72 km/h (20 m/s) -> 1.80s headway
+        lt.feedDataFront({ frontVehicleObjectID: 7, frontVehicleGapX: 576, qualifierEventDataFunctionFrontVehicle: 0 }, 1000);
+        let lSnap = lt.snapshot(72, 1050);
+        assert.strictEqual(lSnap.active, true);
+        assert(Math.abs(lSnap.gapM - 36.0) < 0.01);
+        assert(Math.abs(lSnap.headwaySec - 1.8) < 0.02);
+
+        // 500ms later, gap closes from 36.0m -> 31.0m (-5.0m in 0.5s = -10 m/s = -36 km/h closing)
+        lt.feedDataFront({ frontVehicleObjectID: 7, frontVehicleGapX: 496, qualifierEventDataFunctionFrontVehicle: 0 }, 1500);
+        lSnap = lt.snapshot(72, 1520);
+        assert(lSnap.relSpeedKmh < -20, 'closing gap must yield negative relSpeedKmh, got ' + lSnap.relSpeedKmh);
+        const hwFmt = formatLeadHeadwayParts(lSnap, unitsMod.US_PRESET, 'full');
+        assert.strictEqual(hwFmt.primaryStr, '1.6s');
+        assert(hwFmt.secDistStr.indexOf('ft') > 0);
+        assert(hwFmt.deltaStr.indexOf('-') === 0 && hwFmt.deltaStr.indexOf('mph') > 0, 'closing speed must format in mph');
+
+        // Below 12 km/h creep: headwaySec is null so primary readout shows distance cleanly instead of 9.9s noise
+        const creepSnap = lt.snapshot(5, 1600);
+        assert.strictEqual(creepSnap.headwaySec, null);
+        const creepFmt = formatLeadHeadwayParts(creepSnap, unitsMod.METRIC_PRESET, 'compact');
+        assert.strictEqual(creepFmt.primaryStr, '31 m');
+        assert.strictEqual(creepFmt.secDistStr, '');
+        assert.strictEqual(creepFmt.deltaStr, '');
+
+        // Staleness > 2.5s or explicit EVENT_DATA_NOT_AVAILABLE clears lead vehicle immediately
+        assert.strictEqual(lt.snapshot(72, 4200).active, false, 'stale radar data >2.5s must auto-hide');
+        lt.feedDataFront({ frontVehicleObjectID: 7, frontVehicleGapX: 400, qualifierEventDataFunctionFrontVehicle: 0 }, 4500);
+        assert.strictEqual(lt.snapshot(72, 4550).active, true);
+        lt.feedDataFront({ frontVehicleObjectID: 255, frontVehicleGapX: 4095, qualifierEventDataFunctionFrontVehicle: 2 }, 4600);
+        assert.strictEqual(lt.snapshot(72, 4620).active, false, 'EVENT_DATA_NOT_AVAILABLE must clear lead vehicle immediately');
+
+        // B. OverlayRenderer: PHEV-only hv_soc_gauge, cabin_temp toggle, and hud_headway geometry across nudges
+        const r = new OverlayRenderer({ allowPanel: true });
+        const phevModel = {
+            units: unitsMod.US_PRESET,
+            profile: { vehicleType: 'phev', engineOn: false, mode: 'ev_drive', isEv: true, isCold: false, coldCeilingRpm: null, alert: null },
+            efficiency: { evKmPerKwh: 6.1, fuelLPer100km: null, isDfco: false },
+            telemetry: {
+                speedKmh: 96, rpm: 0, hvKw: 14.0, soc: 68, soc12: 86, v12: 14.0, cabinTempC: 22.0,
+                stage: 'D', program: 'D', gear: 6,
+                leadVehicle: { active: true, gapM: 32.0, headwaySec: 1.2, relSpeedKmh: -11.0, status: 'ok' },
+            },
+        };
+
+        [-40, 0, 40].forEach((nudge) => {
+            r.render(phevModel, { enabled: true, hudHeadway: 'full', hudNudgeX: nudge, hudNudgeY: nudge }, 5000);
+            const hwL = r.layers.hud_headway;
+            assert(hwL && hwL.visible, 'hud_headway must be visible when leadVehicle.active=true');
+            const hudIssues = visible.check([{ id: 'hud_headway', x: hwL.rect.x, y: hwL.rect.y, w: hwL.rect.w, h: hwL.rect.h }], 'hud');
+            assert.strictEqual(hudIssues.length, 0, 'hud_headway must pass visible.check at nudge=' + nudge + ': ' + hudIssues.join(', '));
+            assert(hwL.rect.y + hwL.rect.h <= visible.HUD_ACC_ASSIST[1], 'hud_headway must stay strictly above ACC y=202');
+            assert(hwL.rect.x + hwL.rect.w < visible.HUD_STOCK_NAV[0], 'hud_headway must stay strictly left of HUD nav x=405');
+        });
+
+        // Turning off hudHeadway or having no lead car hides hud_headway
+        r.render(phevModel, { enabled: true, hudHeadway: 'off' }, 5100);
+        assert.strictEqual(r.layers.hud_headway.visible, false, 'hudHeadway=off must hide hud_headway');
+
+        // PHEV vs ICE: hv_soc_gauge MUST be hidden on ICE cars even if soc were present!
+        assert.strictEqual(r.layers.hv_soc_gauge.visible, true, 'PHEV must show hv_soc_gauge');
+        const iceModel = Object.assign({}, phevModel, {
+            profile: { vehicleType: 'ice', engineOn: true, mode: 'gas_warm', isEv: false, isCold: false, coldCeilingRpm: null, alert: null },
+        });
+        r.render(iceModel, { enabled: true, hvSocGauge: true }, 5200);
+        assert.strictEqual(r.layers.hv_soc_gauge.visible, false, 'ICE cars must NEVER render hv_soc_gauge over their oil-temp gauge');
+
+        // Turning off cabinTempDisplay hides cabin_temp
+        r.render(phevModel, { enabled: true, cabinTempDisplay: false, hvSocGauge: false }, 5300);
+        assert.strictEqual(r.layers.cabin_temp.visible, false, 'cabinTempDisplay=false must hide cabin_temp');
+        assert.strictEqual(r.layers.hv_soc_gauge.visible, false, 'hvSocGauge=false must hide hv_soc_gauge');
+
+        // C. Strict On-Demand Subscription Gating (`SignalHub.syncDemand` tears down disabled SOME/IP watchers)
+        const watched = {};
+        const shutdownCounts = {};
+        const appSpec = JSON.parse(fs.readFileSync(path.join(APP_DIR, 'app.json'), 'utf8'));
+        const fakeSignals = {
+            watch(iface) {
+                watched[iface] = (watched[iface] || 0) + 1;
+                return Promise.resolve({
+                    iface,
+                    available: true,
+                    shutdown() {
+                        shutdownCounts[iface] = (shutdownCounts[iface] || 0) + 1;
+                        return Promise.resolve();
+                    },
+                });
+            },
+        };
+        const settingsValues = {
+            enabled: true,
+            demo: 'off',
+            displayTarget: 'both',
+            hudHeadway: 'full',
+            cabinTempDisplay: true,
+            widgetMedia: true,
+            widgetTrip: true,
+        };
+        const demandHub = new SignalHub({
+            log: { info: () => {}, warn: () => {}, error: () => {} },
+            spec: appSpec,
+            settings: { values: settingsValues, get: (k) => settingsValues[k] },
+            signals: fakeSignals,
+        }, { noDiag: true, ipcDir: path.join(os.tmpdir(), 'no-ipc-demand-' + process.pid) });
+
+        demandHub.start();
+        await new Promise((res) => setTimeout(res, 25));
+        assert.strictEqual(demandHub.activeWatchers().gapAhead, true);
+        assert.strictEqual(demandHub.activeWatchers().climate, true);
+        assert.strictEqual(demandHub.activeWatchers().media, true);
+        assert.strictEqual(watched['de.bmw.dass.GapVehicleAhead'], 1);
+        assert.strictEqual(watched['de.bmw.infotainment.climate.Climate2'], 1);
+
+        // Turn OFF hudHeadway, cabinTempDisplay, and right-wing widgets -> proxies MUST shut down!
+        settingsValues.hudHeadway = 'off';
+        settingsValues.cabinTempDisplay = false;
+        settingsValues.widgetMedia = false;
+        settingsValues.widgetTrip = false;
+        demandHub.syncDemand(settingsValues, { diagVisible: false });
+        await new Promise((res) => setTimeout(res, 25));
+        assert.strictEqual(demandHub.activeWatchers().gapAhead, false);
+        assert.strictEqual(demandHub.activeWatchers().climate, false);
+        assert.strictEqual(demandHub.activeWatchers().media, false);
+        assert.strictEqual(shutdownCounts['de.bmw.dass.GapVehicleAhead'], 1, 'GapVehicleAhead proxy must be shut down when hudHeadway=off');
+        assert.strictEqual(shutdownCounts['de.bmw.infotainment.climate.Climate2'], 1, 'Climate2 proxy must be shut down when cabinTempDisplay=false');
+        assert.strictEqual(shutdownCounts['de.bmw.infotainment.hmi.hmimediastate.HmiMediaState'], 1, 'HmiMediaState proxy must be shut down when right widgets are off');
+
+        // Re-enabling hudHeadway & cabinTempDisplay cleanly re-subscribes
+        settingsValues.hudHeadway = 'compact';
+        settingsValues.cabinTempDisplay = true;
+        demandHub.syncDemand(settingsValues, { diagVisible: false });
+        await new Promise((res) => setTimeout(res, 25));
+        assert.strictEqual(demandHub.activeWatchers().gapAhead, true);
+        assert.strictEqual(demandHub.activeWatchers().climate, true);
+        assert.strictEqual(watched['de.bmw.dass.GapVehicleAhead'], 2);
+        assert.strictEqual(watched['de.bmw.infotainment.climate.Climate2'], 2);
+
+        demandHub.stop();
     });
 
     console.log('\nAll ' + passed + ' tests passed.');

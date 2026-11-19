@@ -10,8 +10,9 @@ __pycache__/
 *.pyc
 .DS_Store
 
-# User car screenshots and derived photo plates (contain personal info)
+# User car screenshots, derived photo plates, and local roadmap notes
 design/resources/
+design/FEATURE_ROADMAP.md
 bench/assets/*.jpg
 bench/assets/*.jpeg
 bench/assets/*.png

@@ -2,7 +2,7 @@
   "id": "cluster_metrics",
   "title": "Cluster Metrics",
   "description": "Real-time efficiency, HV battery %, powertrain temperatures, gear in D, full-wing Right-Wing Media/Charging/Trip widget, HUD turn-by-turn nav, and live DSC hydraulic brake indicator for BMW iDrive 7",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "license": "GPL-3.0-only",
   "vendor": "chyiz",
   "vendorFiles": {
@@ -35,7 +35,8 @@
   "signals": {
     "de.bmw.infotainment.vehicle.CDS": {
       "statusEngineSpeed2": "rs",
-      "statusEngineTemperature": "rs"
+      "statusEngineTemperature": "rs",
+      "statusBattery2": "rs"
     },
     "de.bmw.infotainment.vehicle.CDS2": {
       "_optional": "g-force, fuel injection rate and alternate engine oil temp",
@@ -186,6 +187,16 @@
       "statusTyrePressure": "rs",
       "statusTargetTyrePressure": "rs"
     },
+    "de.bmw.infotainment.climate.Climate2": {
+      "_optional": "interior cabin temperature",
+      "statusTemperatureInside": "rs"
+    },
+    "de.bmw.dass.GapVehicleAhead": {
+      "_optional": "radar/camera lead vehicle distance, headway, and relative speed",
+      "GapVehicleDrivingAhead": "s",
+      "DataFrontVehicle": "s",
+      "DataFrontVehicleExtended": "s"
+    },
     "com.harman.infotainment.systemfunctions.tasu.tasu.InternalTasu": {
       "_optional": "read-only UDS telemetry (HV battery kW/SoC, DME fuel rate, 12V battery, IAT)",
       "_instances": "SystemFunctionsInternalTasuInst1",
@@ -269,6 +280,8 @@
           }
         ],
         "gearDisplay",
+        "cabinTempDisplay",
+        "hvSocGauge",
         "brakeIndicator",
         "cornerRightDisplay",
         "cornerLeftDisplay",
@@ -283,6 +296,7 @@
       "repoLink": false,
       "settings": [
         "hudNavMode",
+        "hudHeadway",
         "hudLine1",
         "hudLine2",
         "hudLine3",
@@ -315,6 +329,11 @@
           "tworow",
           "DIAG_NAV",
           "HUD Navigation & Mini-Map Detector"
+        ],
+        [
+          "tworow",
+          "DIAG_HEADWAY",
+          "HUD Lead-Car Headway (GapVehicleAhead)"
         ],
         [
           "tworow",
@@ -441,6 +460,26 @@
       ]
     },
     {
+      "key": "hudHeadway",
+      "label": "Lead-car headway (HUD)",
+      "type": "choice",
+      "default": "full",
+      "options": [
+        [
+          "full",
+          "Time + distance + closing speed"
+        ],
+        [
+          "compact",
+          "Time + distance only"
+        ],
+        [
+          "off",
+          "Off"
+        ]
+      ]
+    },
+    {
       "key": "hudLine1",
       "label": "HUD Line 1 (top)",
       "type": "choice",
@@ -466,6 +505,14 @@
         [
           "soc",
           "HV Battery %"
+        ],
+        [
+          "soc12",
+          "12V Battery %"
+        ],
+        [
+          "headway",
+          "Lead-car headway"
         ],
         [
           "temps",
@@ -501,8 +548,16 @@
           "HV Battery %"
         ],
         [
+          "soc12",
+          "12V Battery %"
+        ],
+        [
           "soc_oil",
           "HV Battery % + Oil temp"
+        ],
+        [
+          "headway",
+          "Lead-car headway"
         ],
         [
           "temps",
@@ -537,6 +592,14 @@
           "HV Battery % + Oil temp"
         ],
         [
+          "soc12",
+          "12V Battery %"
+        ],
+        [
+          "headway",
+          "Lead-car headway"
+        ],
+        [
           "gear",
           "Current gear (D1-D8)"
         ],
@@ -547,6 +610,18 @@
       ]
     },
     {
+      "key": "cabinTempDisplay",
+      "label": "Cabin temperature (left of ambient)",
+      "type": "bool",
+      "default": true
+    },
+    {
+      "key": "hvSocGauge",
+      "label": "HV battery % on gauge (PHEV)",
+      "type": "bool",
+      "default": true
+    },
+    {
       "key": "cornerRightDisplay",
       "label": "Bottom-right indicator",
       "type": "choice",
@@ -555,15 +630,15 @@
       "options": [
         [
           "auto",
-          "HV Battery % (IAT on ICE)"
+          "Auto (12V % / 12V V / IAT)"
         ],
         [
-          "soc",
-          "HV Battery %"
+          "soc12",
+          "12V battery %"
         ],
         [
           "batt",
-          "HV Battery temp"
+          "HV battery temp"
         ],
         [
           "gbx",
@@ -576,6 +651,10 @@
         [
           "iat",
           "Intake air temp"
+        ],
+        [
+          "soc",
+          "HV battery % (bottom corner)"
         ],
         [
           "off",
@@ -929,6 +1008,11 @@
         "invalid": 255
       },
       "ambient": {
+        "factor": 0.5,
+        "offset": -40,
+        "invalid": 255
+      },
+      "cabin": {
         "factor": 0.5,
         "offset": -40,
         "invalid": 255
