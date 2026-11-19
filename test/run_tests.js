@@ -40,11 +40,12 @@ const unitsMod = require(path.join(APP_DIR, 'units'));
 const { EfficiencyTracker } = require(path.join(APP_DIR, 'efficiency'));
 const { VehicleProfile, coldRevCeilingRpm, detectAnomaly } = require(path.join(APP_DIR, 'vehicle_profile'));
 const {
-    OverlayRenderer, inspectClusterSlotConfig, resolveCornerRightMode, formatLeadHeadwayParts, CLUSTER_LAYER_NAMES,
+    OverlayRenderer, inspectClusterSlotConfig, resolveCornerRightMode, formatLeadHeadwayParts, cabinHvacPalette, CLUSTER_LAYER_NAMES,
 } = require(path.join(APP_DIR, 'overlay_renderer'));
 const { ClusterRender } = require(VENDOR_FILES['./cluster_render_client']);
 const {
     SignalHub, FastKw, LeadVehicleTracker, decodeStatusBattery2, decodeCabinTemp,
+    createHvacState, feedHvacClimate2, feedHvacClimateMaster, resolveHvacMode,
     computeFrictionBrake, computeChargingState, decodeDscPressure, decodeDscPedal, decodeDscRegen, flagActive,
 } = require(path.join(APP_DIR, 'signals'));
 const { NavTracker, parseHudStatusText, parseWazeHudShowing } = require(path.join(APP_DIR, 'nav_tracker'));
@@ -1793,9 +1794,11 @@ function inBox(x, y, box) {
         await new Promise((res) => setTimeout(res, 25));
         assert.strictEqual(demandHub.activeWatchers().gapAhead, true);
         assert.strictEqual(demandHub.activeWatchers().climate, true);
+        assert.strictEqual(demandHub.activeWatchers().climateMaster, true);
         assert.strictEqual(demandHub.activeWatchers().media, true);
         assert.strictEqual(watched['de.bmw.dass.GapVehicleAhead'], 1);
         assert.strictEqual(watched['de.bmw.infotainment.climate.Climate2'], 1);
+        assert.strictEqual(watched['de.bmw.infotainment.climate.climatemaster.ClimateMaster'], 1);
 
         // Turn OFF hudHeadway, cabinTempDisplay, and right-wing widgets -> proxies MUST shut down!
         settingsValues.hudHeadway = 'off';
@@ -1806,9 +1809,11 @@ function inBox(x, y, box) {
         await new Promise((res) => setTimeout(res, 25));
         assert.strictEqual(demandHub.activeWatchers().gapAhead, false);
         assert.strictEqual(demandHub.activeWatchers().climate, false);
+        assert.strictEqual(demandHub.activeWatchers().climateMaster, false);
         assert.strictEqual(demandHub.activeWatchers().media, false);
         assert.strictEqual(shutdownCounts['de.bmw.dass.GapVehicleAhead'], 1, 'GapVehicleAhead proxy must be shut down when hudHeadway=off');
         assert.strictEqual(shutdownCounts['de.bmw.infotainment.climate.Climate2'], 1, 'Climate2 proxy must be shut down when cabinTempDisplay=false');
+        assert.strictEqual(shutdownCounts['de.bmw.infotainment.climate.climatemaster.ClimateMaster'], 1, 'ClimateMaster proxy must be shut down when cabinTempDisplay=false');
         assert.strictEqual(shutdownCounts['de.bmw.infotainment.hmi.hmimediastate.HmiMediaState'], 1, 'HmiMediaState proxy must be shut down when right widgets are off');
 
         // Re-enabling hudHeadway & cabinTempDisplay cleanly re-subscribes
@@ -1818,8 +1823,10 @@ function inBox(x, y, box) {
         await new Promise((res) => setTimeout(res, 25));
         assert.strictEqual(demandHub.activeWatchers().gapAhead, true);
         assert.strictEqual(demandHub.activeWatchers().climate, true);
+        assert.strictEqual(demandHub.activeWatchers().climateMaster, true);
         assert.strictEqual(watched['de.bmw.dass.GapVehicleAhead'], 2);
         assert.strictEqual(watched['de.bmw.infotainment.climate.Climate2'], 2);
+        assert.strictEqual(watched['de.bmw.infotainment.climate.climatemaster.ClimateMaster'], 2);
 
         demandHub.stop();
     });
@@ -1926,6 +1933,136 @@ function inBox(x, y, box) {
             const text = fs.readFileSync(f, 'utf8');
             new vm.Script(Module.wrap(text), { filename: f });
         });
+    });
+
+    /* 19. v0.8.2: Cabin Temp Option A + HVAC Mode Color Coding & Non-Redundant Charging Widget */
+    await test('v0.8.2: Cabin Temp Option A + HVAC color coding (AC blue, Fan white, Heating orange) & de-duplicated Charging widget', () => {
+        // A. HVAC thermal mode classifier (Climate2 + ClimateMaster)
+        let hs = createHvacState();
+        assert.strictEqual(resolveHvacMode(hs, 22.0), null, 'empty HVAC state must return null (white fallback)');
+
+        // Summer AC cooling: ClimateMaster ON + AC ON + target 20C while cabin is 25C
+        feedHvacClimateMaster(hs, 'statusClimateSystemOn', [{ operationZone: 'DRIVER', airConditioningOn: true }]);
+        feedHvacClimateMaster(hs, 'statusAirCondAC', [{ operationZone: 'DRIVER', acButton: true }]);
+        feedHvacClimateMaster(hs, 'statusTemperature', [{ operationZone: 'DRIVER', targetTemperature: 20.0 }]);
+        assert.strictEqual(resolveHvacMode(hs, 25.0), 'cooling');
+
+        // Winter AUTO cabin warming: AC dehumidifier button stays ON, but cabin is 15.5C and target is 21.5C -> MUST be 'heating' (orange)!
+        feedHvacClimateMaster(hs, 'statusTemperature', [{ operationZone: 'DRIVER', targetTemperature: 21.5 }]);
+        assert.strictEqual(resolveHvacMode(hs, 15.5), 'heating', 'winter AUTO heating with AC dehumidifier on must classify as heating');
+
+        // Fan-only ventilation: AC button OFF, target near cabin temp -> 'fan' (white)
+        feedHvacClimateMaster(hs, 'statusAirCondAC', [{ operationZone: 'DRIVER', acButton: false }]);
+        feedHvacClimate2(hs, 'statusAirConditionDRStatus', { statusBlowerSettingDR: 4, statusAirInjectionManifoldProgramDR: 'VENT' });
+        assert.strictEqual(resolveHvacMode(hs, 21.2), 'fan');
+
+        // Front Defrost / HI override -> 'heating'; MAX AC override -> 'cooling'; System OFF -> 'off'
+        feedHvacClimate2(hs, 'statusACFrontFunctions', { statusDefrost: 'DEFROST_EIN' });
+        assert.strictEqual(resolveHvacMode(hs, 21.2), 'heating');
+        feedHvacClimate2(hs, 'statusACFrontFunctions', { statusDefrost: 'DEFROST_AUS' });
+        feedHvacClimateMaster(hs, 'statusAirCondMaxAC', [{ operationZone: 'DRIVER', maxAirConditioning: true }]);
+        assert.strictEqual(resolveHvacMode(hs, 21.2), 'cooling');
+        feedHvacClimateMaster(hs, 'statusClimateSystemOn', [{ operationZone: 'DRIVER', airConditioningOn: false }]);
+        assert.strictEqual(resolveHvacMode(hs, 21.2), 'off');
+
+        // B. Cabin Temp Option A pixel colors (Blue for cooling, White for fan/unknown, Orange for heating)
+        assert.strictEqual(cabinHvacPalette('cooling').val, '#5bc8ff');
+        assert.strictEqual(cabinHvacPalette('heating').val, '#ff9f43');
+        assert.strictEqual(cabinHvacPalette('fan').val, '#f2f5fa');
+        assert.strictEqual(cabinHvacPalette(null).val, '#f2f5fa');
+
+        const r = new OverlayRenderer({ allowPanel: true });
+        const countValuePixels = (cv) => {
+            let blue = 0, orange = 0, white = 0;
+            for (let y = 24; y <= 45; y++) {
+                for (let x = 4; x < cv.w - 2; x++) {
+                    const o = (y * cv.w + x) * 4;
+                    const pr = cv.d[o], pg = cv.d[o + 1], pb = cv.d[o + 2], pa = cv.d[o + 3];
+                    if (pa < 200) continue;
+                    if (pb > pr + 60 && pg > 140) blue++;
+                    else if (pr > pb + 90 && pg > 110) orange++;
+                    else if (pr > 220 && pg > 220 && pb > 220) white++;
+                }
+            }
+            return { blue, orange, white };
+        };
+
+        const baseModel = {
+            units: unitsMod.US_PRESET,
+            profile: { vehicleType: 'phev', engineOn: false, mode: 'ev_drive', isEv: true, isCold: false, coldCeilingRpm: null, alert: null },
+            efficiency: { evKmPerKwh: 6.1, fuelLPer100km: null, isDfco: false },
+            telemetry: {
+                speedKmh: 72, rpm: 0, hvKw: 12.0, hvVolts: 364, soc: 68, soc12: 86, v12: 14.0,
+                cabinTempC: 22.0, cabinHvacMode: 'cooling', stage: 'D', program: 'D', gear: 6,
+            },
+        };
+
+        r.render(baseModel, { enabled: true }, 7000);
+        const pxCool = countValuePixels(r.layers.cabin_temp.cv);
+        assert(pxCool.blue > 40 && pxCool.orange === 0, 'AC cooling must render blue cabin temp value pixels, got ' + JSON.stringify(pxCool));
+
+        baseModel.telemetry.cabinHvacMode = 'heating';
+        r.render(baseModel, { enabled: true }, 7100);
+        const pxHeat = countValuePixels(r.layers.cabin_temp.cv);
+        assert(pxHeat.orange > 40 && pxHeat.blue === 0, 'Heating must render orange cabin temp value pixels, got ' + JSON.stringify(pxHeat));
+
+        baseModel.telemetry.cabinHvacMode = 'fan';
+        r.render(baseModel, { enabled: true }, 7200);
+        const pxFan = countValuePixels(r.layers.cabin_temp.cv);
+        assert(pxFan.white > 40 && pxFan.blue === 0 && pxFan.orange === 0, 'Fan-only must render white cabin temp value pixels, got ' + JSON.stringify(pxFan));
+
+        // C. Session addedKwh integration & Non-Redundant Charging Widget clearance above world y = 550
+        const chgRaw = { wirePlugged: true, plugLocked: true, phases: 1, lscStatus: 'active', endHour: 16, endMin: 35, residualMin: 129, targetSoc: 100 };
+        let cState = computeChargingState(chgRaw, { speedKmh: 0, rpm: 0, hvKw: -3.6, soc: 70, stage: 'P' }, 10000);
+        assert.strictEqual(cState.active, true);
+        assert.strictEqual(cState.plugLocked, true);
+        assert.strictEqual(cState.phases, 1);
+        // 10 seconds later at 3.6 kW = +0.01 kWh; plus SoC rising 70 -> 80% (~1.08 kWh)
+        cState = computeChargingState(chgRaw, { speedKmh: 0, rpm: 0, hvKw: -3.6, soc: 80, stage: 'P' }, 20000);
+        assert(cState.addedKwh > 1.0, 'session addedKwh must track charging energy, got ' + cState.addedKwh);
+
+        const chgModel = {
+            units: unitsMod.US_PRESET,
+            profile: { vehicleType: 'phev', engineOn: false, mode: 'ev_drive', isEv: true, isCold: false, coldCeilingRpm: null, alert: null },
+            efficiency: { evKmPerKwh: null, fuelLPer100km: null, isDfco: false },
+            telemetry: {
+                speedKmh: 0, rpm: 0, hvKw: -3.6, hvVolts: 396, battTempC: 24.5, soc: 80, soc12: 91,
+                cabinTempC: 21.0, cabinHvacMode: null, stage: 'P', program: 'D', gear: 0,
+                charging: cState,
+            },
+        };
+        r.render(chgModel, { enabled: true }, 20100);
+        const rwCv = r.layers.right_widget.cv;
+        let heroClockPixels = 0;
+        let lowerGridPixels = 0;
+        let belowSafeZonePixels = 0;
+        for (let y = 170; y <= 232; y++) {
+            for (let x = 60; x <= 312; x++) {
+                if (rwCv.d[(y * rwCv.w + x) * 4 + 3] > 200) heroClockPixels++;
+            }
+        }
+        for (let y = 298; y <= 416; y++) {
+            for (let x = 28; x <= 346; x++) {
+                if (rwCv.d[(y * rwCv.w + x) * 4 + 3] > 200) lowerGridPixels++;
+            }
+        }
+        // World y = 550 corresponds to ry = 550 - 88 = 462; verify ry >= 428 has ZERO pixels!
+        for (let y = 428; y < rwCv.h; y++) {
+            for (let x = 0; x < rwCv.w; x++) {
+                if (rwCv.d[(y * rwCv.w + x) * 4 + 3] > 0) belowSafeZonePixels++;
+            }
+        }
+        assert(heroClockPixels > 800, 'enlarged 68px finish clock must paint substantial hero pixels, got ' + heroClockPixels);
+        assert(lowerGridPixels > 500, 'non-redundant 2x2 charging grid must populate lower deck, got ' + lowerGridPixels);
+        assert.strictEqual(belowSafeZonePixels, 0, 'charging widget must leave ry >= 428 (world y >= 516) 100% clear of stock range labels');
+
+        // Unplugging resets session addedKwh cleanly
+        chgRaw.wirePlugged = false;
+        chgRaw.plugLocked = false;
+        chgRaw.lscStatus = 'done';
+        const cUnplugged = computeChargingState(chgRaw, { speedKmh: 0, rpm: 0, hvKw: 0, soc: 80, stage: 'P' }, 25000);
+        assert.strictEqual(cUnplugged.active, false);
+        assert.strictEqual(cUnplugged.addedKwh, null);
     });
 
     console.log('\nAll ' + passed + ' tests passed.');

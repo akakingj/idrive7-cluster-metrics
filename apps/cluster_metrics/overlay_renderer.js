@@ -44,7 +44,7 @@ const DEFAULT_WAZE_STATUS = '/run/waze-on-cluster/status.json';
 const BELOW_SPEED_BASE = { x: 392, y: 445, w: 214, h: 84 };
 // Snugly right of KOMBI4's single-letter 'D' (1400..1424; GEAR_WIN 1380..1426). Hidden in S/M where BMW renders S1..S8 natively.
 const GEAR_D_BASE = { x: 1429, y: 650, w: 30, h: 56 };
-// Sleek car-silhouette cabin temperature badge in the pocket between gear_d (1429..1459) and stock ambient temp (+57°F at 1540+)
+// Stacked OEM 'CABIN' micro-header + HVAC-colored interior temperature between gear_d (1429..1459) and stock ambient (+57°F at 1540+)
 const CABIN_TEMP_BASE = { x: 1458, y: 654, w: 74, h: 50 };
 const BRAKE_RAIL_BASE = { x: 1280, y: 609, w: 296, h: 31 };
 const CORNER_LEFT_BASE = { x: 8, y: 643, w: 116, h: 66 };
@@ -101,6 +101,16 @@ const COL = {
 };
 
 function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+function cabinHvacPalette(hvacMode) {
+    if (hvacMode === 'cooling') {
+        return { val: '#5bc8ff', unit: '#7fb8e6' };
+    }
+    if (hvacMode === 'heating') {
+        return { val: '#ff9f43', unit: '#d9924e' };
+    }
+    return { val: '#f2f5fa', unit: '#9aa6b6' };
+}
 
 function formatDuration(sec) {
     if (typeof sec !== 'number' || !isFinite(sec) || sec < 0) return '--:--';
@@ -778,7 +788,7 @@ class OverlayRenderer {
                 this._setVisible('gear_d', false);
             }
 
-            // 1b2. Cabin Temperature Badge Left of Ambient Temp (1458..1532, 654..704; car-silhouette enclosure)
+            // 1b2. Stacked 'CABIN' Interior Temperature Left of Ambient Temp (1458..1532, 654..704; HVAC-mode colored)
             if (showCabinTemp) {
                 const ctRect = {
                     x: clamp(CABIN_TEMP_BASE.x + cx, 1457, 1463),
@@ -787,7 +797,7 @@ class OverlayRenderer {
                     h: CABIN_TEMP_BASE.h,
                 };
                 const lCt = this._ensureOrLocal('cabin_temp', Object.assign({ target: 'panel', visible: true, z: 14 }, ctRect));
-                this._paintCabinTemp(lCt.cv, t.cabinTempC, units);
+                this._paintCabinTemp(lCt.cv, t.cabinTempC, units, t.cabinHvacMode);
                 this._setVisible('cabin_temp', true);
                 this._upload('cabin_temp');
             } else {
@@ -869,16 +879,20 @@ class OverlayRenderer {
                 };
                 const lRw = this._ensureOrLocal('right_widget', Object.assign({ target: 'panel', visible: true, z: 11 }, rwRect));
                 if (rightWidgetPage === 'charging') {
-                    const kwKey = (chg && typeof chg.chargeKw === 'number' && isFinite(chg.chargeKw)) ? chg.chargeKw.toFixed(1) : '--';
+                    const addedKey = (chg && typeof chg.addedKwh === 'number' && isFinite(chg.addedKwh)) ? chg.addedKwh.toFixed(1) : '--';
+                    const hvVKey = (typeof t.hvVolts === 'number' && isFinite(t.hvVolts)) ? Math.round(t.hvVolts) : -1;
+                    const battTKey = (typeof t.battTempC === 'number' && isFinite(t.battTempC)) ? Math.round(t.battTempC) : -99;
                     const rwKey = 'C|' + [
                         chg ? chg.finishTimeText : '--:--',
                         chg ? chg.remainText : '',
-                        kwKey,
-                        chg && chg.maxAmps ? chg.maxAmps : '',
-                        typeof t.soc === 'number' ? Math.round(t.soc) : -1,
                         chg ? chg.targetSoc : 100,
-                        typeof t.erangeKm === 'number' ? Math.round(t.erangeKm) : -1,
-                        units.distUnit,
+                        chg && chg.plugLocked ? 1 : 0,
+                        chg && chg.preconActive ? 1 : 0,
+                        chg && chg.phases ? chg.phases : 0,
+                        addedKey,
+                        hvVKey,
+                        battTKey,
+                        units.tempUnit,
                     ].join('|');
                     if (rwKey !== this.lastRightWidgetKey || !lRw.prevBuf) {
                         this._paintRightCharging(lRw.cv, chg, t, units);
@@ -1103,44 +1117,36 @@ class OverlayRenderer {
     }
 
     /**
-     * Sleek BMW sedan-silhouette enclosure around interior cabin temperature (`74x50`),
-     * placed directly left of stock ambient temperature (`+57°F`) with breathing room before '+'.
+     * Option A: Unboxed OEM two-row stacked interior cabin temperature (`74x50`),
+     * matching `12V` and `SOC` micro-header hierarchy, with HVAC thermal color coding:
+     *   - `'cooling'` (AC cooling) -> Blue (`#5bc8ff`)
+     *   - `'heating'` (Heating/Defrost) -> Orange (`#ff9f43`)
+     *   - `'fan'` / `'off'` / `null` -> White (`#f2f5fa`)
      */
-    _paintCabinTemp(cv, cabinTempC, units) {
+    _paintCabinTemp(cv, cabinTempC, units, hvacMode) {
         cv.clear(COL.clear);
         const tf = formatTemp(cabinTempC, units);
-        const fillCol = [10, 18, 30, 182];
-        const rimCol = '#8eb8e5';
+        const numPart = String(tf.value);
+        const unitPart = tf.unit;
+        const pal = cabinHvacPalette(hvacMode);
+        const cx = 40;
 
-        // Fill upper greenhouse + lower sedan body
-        cv.convex([[12, 19], [21, 8], [50, 8], [59, 19]], fillCol);
-        cv.roundRect(3, 18, 66, 22, 3, fillCol);
+        drawTextOutline(cv, 'CABIN', cx, 17, 12, '#9ab0c9', { font: 'bold', align: 'center' });
 
-        // Two subtle lower tire treads so the silhouette reads unmistakably as a car at a glance
-        cv.roundRect(11, 39, 11, 4, 1.5, COL.outline);
-        cv.roundRect(50, 39, 11, 4, 1.5, COL.outline);
-        cv.roundRect(12, 39, 9, 3, 1, rimCol);
-        cv.roundRect(51, 39, 9, 3, 1, rimCol);
-
-        // Sedan greenhouse + body contour + subtle B-pillar & window sill
-        const pts = [
-            [4, 20],
-            [12, 18],
-            [21, 8],
-            [50, 8],
-            [59, 18],
-            [68, 20],
-            [68, 39],
-            [4, 39],
-            [4, 20],
-        ];
-        cv.polyline(pts, 3.2, COL.outline);
-        cv.polyline(pts, 1.6, rimCol);
-        cv.line(35, 9, 35, 18, 1.2, [142, 184, 229, 115]);
-        cv.line(13, 18, 58, 18, 1.0, [142, 184, 229, 95]);
-
-        const sz = tf.text.length >= 5 ? 16 : 17;
-        drawTextOutline(cv, tf.text, 36, 35, sz, COL.white, { font: 'bold', align: 'center' });
+        let numSz = 22;
+        let unitSz = 15;
+        let nw = cv.textWidth(numPart, numSz, { font: 'bold' });
+        let uw = cv.textWidth(unitPart, unitSz, { font: 'bold' });
+        if (nw + uw + 2 > 66) {
+            numSz = 20;
+            unitSz = 14;
+            nw = cv.textWidth(numPart, numSz, { font: 'bold' });
+            uw = cv.textWidth(unitPart, unitSz, { font: 'bold' });
+        }
+        const total = nw + uw + 2;
+        const x0 = Math.max(2, Math.round(cx - total / 2));
+        drawTextOutline(cv, numPart, x0, 42, numSz, pal.val, { font: 'bold', align: 'left' });
+        drawTextOutline(cv, unitPart, x0 + nw + 2, 42, unitSz, pal.unit, { font: 'bold', align: 'left' });
     }
 
     /**
@@ -1360,50 +1366,90 @@ class OverlayRenderer {
     }
 
     /**
-     * Right-Wing Plug-In Charging Finish Time Widget (auto-locked while car is charging):
+     * Right-Wing Plug-In Charging Widget (auto-locked while car is charging):
+     *   - Drops all items already shown elsewhere on BMW's charging screen (progress bar, kW/A speed, current SoC/range)
+     *   - Enlarges hero EST. FINISH clock (`68px`) + remaining duration (`25px`)
+     *   - Fills the lower deck (`ry <= 412`, world `y <= 500`, clear of stock `19 mi  21 mi` at `y = 550`)
+     *     with non-redundant charging data (`CHARGE TARGET`, `SESSION ADDED` kWh, `HV PACK` V, `BATT TEMP`),
+     *     dynamically enlarging typography if fewer sensors are awake so there are never `--` placeholders.
      */
     _paintRightCharging(cv, chg, t, units) {
         cv.clear(COL.clear);
         const c = chg || {};
-        const midX = 186;
-        const leftX = 40;
-        const rightX = 332;
-        const isMi = units.distUnit === 'mi';
-        const dUnit = isMi ? ' mi' : ' km';
-        const dScale = isMi ? 0.621371 : 1;
+        const midX = 204;
+        const leftX = 44;
+        const rightX = 364;
 
-        paintRadialGlow(cv, midX, 210, 148, [56, 178, 246], 34);
-        drawTextOutline(cv, 'CHARGING', midX, 122, 18, COL.cyan, { font: 'bold', align: 'center' });
-        cv.fillRect(leftX, 134, rightX - leftX, 2, COL.divider);
+        paintRadialGlow(cv, midX, 222, 166, [56, 178, 246], 38);
+        const hdr = c.preconActive
+            ? 'CHARGING  -  PRECOND'
+            : (c.plugLocked ? 'CHARGING  -  LOCKED' : 'CHARGING');
+        drawTextOutline(cv, hdr, midX, 112, 19, COL.cyan, { font: 'bold', align: 'center' });
+        cv.fillRect(leftX, 126, rightX - leftX, 2, COL.divider);
 
-        drawTextOutline(cv, 'EST. FINISH', midX, 166, 15, COL.tagGray, { font: 'bold', align: 'center' });
+        drawTextOutline(cv, 'EST. FINISH', midX, 155, 16, COL.tagGray, { font: 'bold', align: 'center' });
         const finStr = c.finishTimeText || '--:--';
-        drawTextOutline(cv, finStr, midX, 224, 52, COL.white, { font: 'num', align: 'center' });
+        drawTextOutline(cv, finStr, midX, 230, 74, COL.white, { font: 'num', align: 'center' });
 
-        const remLabel = c.remainText ? (c.remainText + ' left') : 'Plugged in';
-        drawTextOutline(cv, remLabel, midX, 256, 20, COL.softBlue, { font: 'bold', align: 'center' });
+        const remLabel = c.remainText ? (c.remainText + ' remaining') : 'Plugged in';
+        drawTextOutline(cv, remLabel, midX, 268, 26, COL.icyBlue, { font: 'bold', align: 'center' });
 
-        const kwStr = (typeof c.chargeKw === 'number' && isFinite(c.chargeKw)) ? (c.chargeKw.toFixed(1) + ' kW') : '-- kW';
-        const speedTag = c.maxAmps ? ('SPEED (' + Math.round(c.maxAmps) + 'A)') : 'CHARGE SPEED';
-        drawTextOutline(cv, speedTag, leftX, 294, 15, COL.tagBlue, { font: 'bold', align: 'left' });
-        drawTextOutline(cv, kwStr, leftX, 326, 26, COL.cyan, { font: 'bold', align: 'left' });
+        cv.fillRect(leftX + 12, 289, rightX - leftX - 24, 1, COL.divider);
 
-        const socPct = (typeof t.soc === 'number' && isFinite(t.soc)) ? Math.round(t.soc) : null;
         const targetPct = c.targetSoc || 100;
-        const erStr = (typeof t.erangeKm === 'number' && isFinite(t.erangeKm)) ? (' (' + Math.round(t.erangeKm * dScale) + dUnit + ')') : '';
-        const socValStr = (socPct !== null ? (socPct + '%') : '--%') + erStr;
-        drawTextOutline(cv, 'TARGET ' + targetPct + '%', rightX, 294, 15, COL.tagBlue, { font: 'bold', align: 'right' });
-        drawTextOutline(cv, socValStr, rightX, 326, 24, COL.white, { font: 'bold', align: 'right' });
+        const cards = [
+            {
+                label: c.phases ? ('TARGET (' + c.phases + 'P)') : 'CHARGE TARGET',
+                val: targetPct + '%',
+                col: COL.white,
+            },
+        ];
+        if (typeof c.addedKwh === 'number' && isFinite(c.addedKwh)) {
+            cards.push({
+                label: 'SESSION ADDED',
+                val: '+' + c.addedKwh.toFixed(1) + ' kWh',
+                col: COL.cyan,
+            });
+        }
+        if (t && typeof t.hvVolts === 'number' && isFinite(t.hvVolts)) {
+            cards.push({
+                label: 'HV PACK',
+                val: Math.round(t.hvVolts) + ' V',
+                col: COL.white,
+            });
+        }
+        if (t && typeof t.battTempC === 'number' && isFinite(t.battTempC)) {
+            const btCol = t.battTempC < 10 ? COL.icyBlue : (t.battTempC >= 42 ? COL.amber : COL.white);
+            cards.push({
+                label: 'BATT TEMP',
+                val: formatTemp(t.battTempC, units).text,
+                col: btCol,
+            });
+        }
 
-        const barX0 = 32;
-        const barW = 296;
-        const barY = 374;
-        const barH = 10;
-        const frac = socPct !== null ? clamp(socPct / 100, 0, 1) : 0;
-        const fillW = Math.max(barH + 2, Math.round(barW * frac));
-        fillSlantBar(cv, barX0, barY, barW, barH, barW, COL.progTrack);
-        if (socPct !== null && socPct > 0) {
-            fillSlantBar(cv, barX0, barY, barW, barH, fillW, [69, 214, 255, 255]);
+        if (cards.length === 1) {
+            drawTextOutline(cv, cards[0].label, midX, 330, 17, COL.tagBlue, { font: 'bold', align: 'center' });
+            drawTextOutline(cv, cards[0].val, midX, 382, 44, cards[0].col, { font: 'num', align: 'center' });
+        } else if (cards.length === 2) {
+            drawTextOutline(cv, cards[0].label, leftX, 330, 17, COL.tagBlue, { font: 'bold', align: 'left' });
+            drawTextOutline(cv, cards[0].val, leftX, 376, 38, cards[0].col, { font: 'num', align: 'left' });
+            drawTextOutline(cv, cards[1].label, rightX, 330, 17, COL.tagBlue, { font: 'bold', align: 'right' });
+            drawTextOutline(cv, cards[1].val, rightX, 376, 38, cards[1].col, { font: 'num', align: 'right' });
+        } else {
+            drawTextOutline(cv, cards[0].label, leftX, 319, 16, COL.tagBlue, { font: 'bold', align: 'left' });
+            drawTextOutline(cv, cards[0].val, leftX, 355, 32, cards[0].col, { font: 'num', align: 'left' });
+            drawTextOutline(cv, cards[1].label, rightX, 319, 16, COL.tagBlue, { font: 'bold', align: 'right' });
+            drawTextOutline(cv, cards[1].val, rightX, 355, 32, cards[1].col, { font: 'num', align: 'right' });
+
+            if (cards.length === 3) {
+                drawTextOutline(cv, cards[2].label, midX, 388, 16, COL.tagBlue, { font: 'bold', align: 'center' });
+                drawTextOutline(cv, cards[2].val, midX, 424, 32, cards[2].col, { font: 'num', align: 'center' });
+            } else {
+                drawTextOutline(cv, cards[2].label, leftX, 388, 16, COL.tagBlue, { font: 'bold', align: 'left' });
+                drawTextOutline(cv, cards[2].val, leftX, 424, 32, cards[2].col, { font: 'num', align: 'left' });
+                drawTextOutline(cv, cards[3].label, rightX, 388, 16, COL.tagBlue, { font: 'bold', align: 'right' });
+                drawTextOutline(cv, cards[3].val, rightX, 424, 32, cards[3].col, { font: 'num', align: 'right' });
+            }
         }
     }
 
@@ -1625,6 +1671,7 @@ module.exports = {
     changes,
     resolveCornerRightMode,
     formatLeadHeadwayParts,
+    cabinHvacPalette,
     BELOW_SPEED_BASE,
     GEAR_D_BASE,
     CABIN_TEMP_BASE,

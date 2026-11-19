@@ -2,7 +2,7 @@
   "id": "cluster_metrics",
   "title": "Cluster Metrics",
   "description": "Real-time efficiency, HV battery %, powertrain temperatures, gear in D, full-wing Right-Wing Media/Charging/Trip widget, HUD turn-by-turn nav, and live DSC hydraulic brake indicator for BMW iDrive 7",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "autostart": true,
   "license": "GPL-3.0-only",
   "vendor": "chyiz",
@@ -189,8 +189,19 @@
       "statusTargetTyrePressure": "rs"
     },
     "de.bmw.infotainment.climate.Climate2": {
-      "_optional": "interior cabin temperature",
-      "statusTemperatureInside": "rs"
+      "_optional": "interior cabin temperature and HVAC cooling/heating/fan state",
+      "statusTemperatureInside": "rs",
+      "statusACFront": "rs",
+      "statusACFrontFunctions": "rs",
+      "statusAirConditionDRStatus": "rs",
+      "statusActualValuePowerACCompressor": "rs"
+    },
+    "de.bmw.infotainment.climate.climatemaster.ClimateMaster": {
+      "_optional": "HVAC system on/off, A/C button, and target temperature setpoint",
+      "statusClimateSystemOn": "rs",
+      "statusAirCondAC": "rs",
+      "statusAirCondMaxAC": "rs",
+      "statusTemperature": "rs"
     },
     "de.bmw.dass.GapVehicleAhead": {
       "_optional": "radar/camera lead vehicle distance, headway, and relative speed",

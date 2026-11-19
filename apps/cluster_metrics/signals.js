@@ -273,6 +273,192 @@ function decodeCabinTemp(v) {
     return (tempC >= -40 && tempC <= 85) ? tempC : null;
 }
 
+function collectEntries(v, key, out) {
+    const acc = out || [];
+    if (!v || typeof v !== 'object') return acc;
+    if (Object.prototype.hasOwnProperty.call(v, key)) {
+        acc.push(v);
+        return acc;
+    }
+    const keys = Object.keys(v);
+    for (let i = 0; i < keys.length; i++) {
+        collectEntries(v[keys[i]], key, acc);
+    }
+    return acc;
+}
+
+function firstEntryVal(v, key) {
+    const found = collectEntries(v, key, []);
+    return found.length > 0 ? found[0][key] : undefined;
+}
+
+function createHvacState() {
+    return {
+        zonesOn: {},
+        zonesAc: {},
+        zonesMaxAc: {},
+        zonesTargetC: {},
+        acFront: null,
+        maxAcFront: null,
+        defrostFront: null,
+        compressorCmd: null,
+        compressorRaw: null,
+        blower: null,
+        programDR: null,
+    };
+}
+
+function setZoneMapVal(map, zoneRaw, val) {
+    const z = (zoneRaw === 'ALL_ZONES' || zoneRaw === 0 || zoneRaw === undefined || zoneRaw === null) ? '0' : String(zoneRaw);
+    map[z] = val;
+}
+
+function anyZoneTrue(map) {
+    const ks = Object.keys(map);
+    if (!ks.length) return null;
+    for (let i = 0; i < ks.length; i++) {
+        if (map[ks[i]] === true) return true;
+    }
+    return false;
+}
+
+function primaryTargetTempC(map) {
+    // Prefer DRIVER ('1' / 'DRIVER'), then ALL_ZONES ('0'), then PASSENGER ('2' / 'PASSENGER'), else first valid zone
+    const pref = ['1', 'DRIVER', '0', 'ALL_ZONES', '2', 'PASSENGER'];
+    for (let i = 0; i < pref.length; i++) {
+        const v = map[pref[i]];
+        if (typeof v === 'number' && isFinite(v) && v >= 14 && v <= 34) return v;
+    }
+    const ks = Object.keys(map);
+    for (let i = 0; i < ks.length; i++) {
+        const v = map[ks[i]];
+        if (typeof v === 'number' && isFinite(v) && v >= 14 && v <= 34) return v;
+    }
+    return null;
+}
+
+function feedHvacClimateMaster(state, field, v) {
+    if (!state || !v || typeof v !== 'object') return;
+    if (field === 'statusClimateSystemOn') {
+        collectEntries(v, 'airConditioningOn', []).forEach((e) => {
+            if (typeof e.airConditioningOn === 'boolean') setZoneMapVal(state.zonesOn, e.operationZone, e.airConditioningOn);
+        });
+    } else if (field === 'statusAirCondAC') {
+        collectEntries(v, 'acButton', []).forEach((e) => {
+            if (typeof e.acButton === 'boolean') setZoneMapVal(state.zonesAc, e.operationZone, e.acButton);
+        });
+    } else if (field === 'statusAirCondMaxAC') {
+        collectEntries(v, 'maxAirConditioning', []).forEach((e) => {
+            if (typeof e.maxAirConditioning === 'boolean') setZoneMapVal(state.zonesMaxAc, e.operationZone, e.maxAirConditioning);
+        });
+        collectEntries(v, 'maxAC', []).forEach((e) => {
+            if (typeof e.maxAC === 'boolean') setZoneMapVal(state.zonesMaxAc, e.operationZone, e.maxAC);
+        });
+    } else if (field === 'statusTemperature') {
+        collectEntries(v, 'targetTemperature', []).forEach((e) => {
+            const t = e.targetTemperature;
+            if (typeof t === 'number' && isFinite(t) && t >= 14 && t <= 34) {
+                setZoneMapVal(state.zonesTargetC, e.operationZone, t);
+            }
+        });
+    }
+}
+
+function feedHvacClimate2(state, field, v) {
+    if (!state || !v || typeof v !== 'object') return;
+    const acEnum = (x) => (x === 1 || x === 'KLIMAANLAGE_EIN' || x === 'MAX_AC_EIN' || x === 'DEFROST_EIN' ||
+        x === 'KLIMAKOMPRESSOR_EINSCHALTEN__S__EIN' ? true
+        : (x === 0 || x === 'KLIMAANLAGE_AUS' || x === 'MAX_AC_AUS' || x === 'DEFROST_AUS' ||
+            x === 'KLIMAKOMPRESSOR_AUSSCHALTEN__S__AUS' ? false : null));
+    if (field === 'statusACFront') {
+        const b = acEnum(firstEntryVal(v, 'statusAircon'));
+        if (b !== null) state.acFront = b;
+    } else if (field === 'statusACFrontFunctions') {
+        const m = acEnum(firstEntryVal(v, 'statusMaximumAircon'));
+        if (m !== null) state.maxAcFront = m;
+        const d = acEnum(firstEntryVal(v, 'statusDefrost'));
+        if (d !== null) state.defrostFront = d;
+        const ac = acEnum(firstEntryVal(v, 'statusAC'));
+        if (ac !== null) state.acFront = ac;
+        const cmd = acEnum(firstEntryVal(v, 'statusAirconFront'));
+        if (cmd !== null) state.compressorCmd = cmd;
+    } else if (field === 'statusActualValuePowerACCompressor') {
+        const p = firstEntryVal(v, 'actualValuePowerACCompressor');
+        if (typeof p === 'number' && isFinite(p) && p >= 0 && p < 255) {
+            state.compressorRaw = p;
+        }
+    } else if (field === 'statusAirConditionDRStatus') {
+        const b = firstEntryVal(v, 'statusBlowerSettingDR');
+        if (typeof b === 'number' && isFinite(b) && b >= 0 && b < 255) state.blower = b;
+        const prog = firstEntryVal(v, 'statusAirInjectionManifoldProgramDR');
+        if (prog !== undefined && prog !== null && prog !== 63 && prog !== 'SIGNAL_UNGUELTIG') {
+            state.programDR = prog;
+        }
+    }
+}
+
+/**
+ * Classify active HVAC thermal mode from BMW `Climate2` + `ClimateMaster` signals:
+ *   - `'cooling'` -> AC cooling active (renders Cabin Temp in icy blue)
+ *   - `'heating'` -> Cabin heating / defrost active (renders Cabin Temp in warm orange)
+ *   - `'fan'`     -> Ventilation / fan-only (renders Cabin Temp in crisp white)
+ *   - `'off'`     -> HVAC off (renders Cabin Temp in crisp white)
+ *   - `null`      -> Unknown / no HVAC status signals received (renders Cabin Temp in crisp white)
+ */
+function resolveHvacMode(state, cabinTempC) {
+    if (!state || typeof state !== 'object') return null;
+
+    const prog = state.programDR;
+    const isProgOff = prog === 43 || prog === 'OFF';
+    const zOn = anyZoneTrue(state.zonesOn);
+    if (isProgOff || zOn === false || (zOn === null && state.blower === 0)) {
+        return 'off';
+    }
+
+    const zAc = anyZoneTrue(state.zonesAc);
+    const zMax = anyZoneTrue(state.zonesMaxAc);
+    const maxAc = zMax === true || state.maxAcFront === true || prog === 41 || prog === 'MAX_AC';
+    const defrost = state.defrostFront === true || prog === 42 || prog === 'DEFROST';
+    const heatProg = prog === 21 || prog === 'HEAT';
+    const ventProg = prog === 18 || prog === 'VENT';
+    const acButton = zAc !== null ? zAc : state.acFront;
+    const compPowerOn = typeof state.compressorRaw === 'number' && state.compressorRaw > 0 && state.compressorRaw < 255;
+    const compExplicitOff = state.compressorCmd === false && state.compressorRaw === 0;
+
+    const systemActive = zOn === true ||
+        (typeof state.blower === 'number' && state.blower > 0 && state.blower < 255) ||
+        maxAc || defrost || heatProg || ventProg || acButton === true || compPowerOn;
+    if (!systemActive) return null;
+
+    const targetC = primaryTargetTempC(state.zonesTargetC);
+    const hasCabin = typeof cabinTempC === 'number' && isFinite(cabinTempC);
+
+    if (maxAc || (targetC !== null && targetC <= 16.0 && acButton !== false)) {
+        return 'cooling';
+    }
+    if (heatProg || defrost || (targetC !== null && targetC >= 28.0)) {
+        return 'heating';
+    }
+    if (targetC !== null && hasCabin) {
+        if (targetC >= cabinTempC + 1.2) {
+            return 'heating';
+        }
+        if (targetC <= cabinTempC - 1.0 && (acButton === true || state.compressorCmd === true || compPowerOn)) {
+            return 'cooling';
+        }
+    }
+    if (ventProg && !compPowerOn && acButton !== true) {
+        return 'fan';
+    }
+    if ((acButton === true || state.compressorCmd === true || compPowerOn) && !compExplicitOff) {
+        return 'cooling';
+    }
+    if (acButton === false || compExplicitOff || zOn === true || (typeof state.blower === 'number' && state.blower > 0)) {
+        return 'fan';
+    }
+    return null;
+}
+
 const LEAD_STALE_MS = 2500;
 
 /**
@@ -459,9 +645,16 @@ function computeChargingState(raw, ctx, nowMs) {
     const notStationary = (speedKmh !== null && speedKmh >= 1.5) || stage === 'D' || stage === 'R';
     if (notStationary) {
         r._shorePowerSince = 0;
+        r._sessionKwh = 0;
+        r._lastIntMs = 0;
+        r._startSoc = null;
         return {
             active: false,
             plugConnected: false,
+            plugLocked: false,
+            phases: null,
+            preconActive: false,
+            addedKwh: null,
             source: 'driving',
             chargeKw: null,
             maxAmps: null,
@@ -478,6 +671,12 @@ function computeChargingState(raw, ctx, nowMs) {
         plugConnected = true;
     } else if (r.wirePlugged === false && r.dcPlugged !== true) {
         plugConnected = false;
+    }
+
+    if (plugConnected === false) {
+        r._sessionKwh = 0;
+        r._lastIntMs = 0;
+        r._startSoc = null;
     }
 
     const stationaryShoreCandidate = (stage === 'P' || !stage) && rpm < 100 && hvKw !== null && hvKw <= -0.65 && plugConnected !== false;
@@ -512,6 +711,32 @@ function computeChargingState(raw, ctx, nowMs) {
     const targetSoc = (typeof r.targetSoc === 'number' && isFinite(r.targetSoc) && r.targetSoc >= 10 && r.targetSoc <= 100)
         ? Math.round(r.targetSoc) : 100;
     const chargeKw = (active && hvKw !== null && hvKw < -0.05) ? Math.abs(hvKw) : null;
+
+    // Integrate session kWh added while plugged in (and cross-check SoC rise across MGU sleep)
+    if (active || plugConnected === true) {
+        if (typeof r._sessionKwh !== 'number' || !isFinite(r._sessionKwh)) r._sessionKwh = 0;
+        if (soc !== null && (r._startSoc === null || r._startSoc === undefined)) {
+            r._startSoc = soc;
+        }
+        if (active && chargeKw !== null && r._lastIntMs > 0) {
+            const dtMs = now - r._lastIntMs;
+            if (dtMs > 0 && dtMs <= 30000) {
+                r._sessionKwh += chargeKw * (dtMs / 3600000);
+            }
+        }
+        if (active) r._lastIntMs = now;
+        else r._lastIntMs = 0;
+    } else {
+        r._lastIntMs = 0;
+    }
+
+    let addedKwh = null;
+    if (active || plugConnected === true) {
+        const intKwh = typeof r._sessionKwh === 'number' ? r._sessionKwh : 0;
+        const socDeltaKwh = (soc !== null && typeof r._startSoc === 'number' && soc > r._startSoc)
+            ? ((soc - r._startSoc) / 100) * 10.8 : 0;
+        addedKwh = Math.max(intKwh, socDeltaKwh);
+    }
 
     if (active && remainMin === null && hasClock) {
         const dNow = new Date(now);
@@ -550,6 +775,10 @@ function computeChargingState(raw, ctx, nowMs) {
     return {
         active,
         plugConnected: plugConnected === true || shorePowerActive,
+        plugLocked: Boolean(r.plugLocked),
+        phases: (typeof r.phases === 'number' && r.phases >= 1 && r.phases <= 3) ? r.phases : null,
+        preconActive: Boolean(r.preconActive),
+        addedKwh,
         source,
         chargeKw,
         maxAmps: (typeof r.maxAmps === 'number' && isFinite(r.maxAmps) && r.maxAmps > 0 && r.maxAmps <= 80) ? Math.round(r.maxAmps) : null,
@@ -795,6 +1024,7 @@ class DemoGenerator {
             return {
                 speedKmh: 0, rpm: 0, gear: 0, stage: 'P', program: 'D',
                 hvKw: -3.5,
+                hvVolts: 396,
                 soc,
                 battTempC: 24.0,
                 oilTempC: 29,
@@ -803,7 +1033,7 @@ class DemoGenerator {
                 erangeKm: 26, frangeKm: 390,
                 gLong: 0, gLat: 0, pedalPct: 0, driverBraking: false, torqueNm: 0, massKg: 2100,
                 frictionG: 0, frictionKw: 0, pureRegen: false, absActive: false,
-                driveMode: 'eco', ambientC: 19.0, cabinTempC: 20.5, gearboxOilC: 32, v12: 13.7, soc12: 91, iatC: 22, xdriveFrontPct: 0,
+                driveMode: 'eco', ambientC: 19.0, cabinTempC: 20.5, cabinHvacMode: 'fan', gearboxOilC: 32, v12: 13.7, soc12: 91, iatC: 22, xdriveFrontPct: 0,
                 leadVehicle: { active: false, gapM: null, headwaySec: null, relSpeedKmh: null, status: 'parked' },
                 tpms: {
                     FL: { pressureBar: 2.4, targetBar: 2.4, tempC: 24 },
@@ -814,6 +1044,10 @@ class DemoGenerator {
                 charging: {
                     active: true,
                     plugConnected: true,
+                    plugLocked: true,
+                    phases: 1,
+                    preconActive: false,
+                    addedKwh: Number((3.4 + ((soc - 68) * 0.11)).toFixed(2)),
                     source: 'bmw_lsc',
                     chargeKw: 3.5,
                     maxAmps: 16,
@@ -827,6 +1061,7 @@ class DemoGenerator {
             };
         }
         const cycle = t % 48; // 48-second driving scenario loop
+        const demoHvacMode = cycle < 20 ? 'cooling' : (cycle < 34 ? 'fan' : 'heating');
         if (kind === 'ice') {
             const warm = Math.min(1, Math.max(0, (cycle - 4) / 22));
             const oilTempC = 32 + warm * 64;
@@ -864,7 +1099,7 @@ class DemoGenerator {
                 boostBar,
                 dmeFuelLh: fuelLh,
                 injVolumeRaw: Math.round(this.injAcc),
-                hvKw: null, soc: null, battTempC: null, erangeKm: null, frangeKm: 418,
+                hvKw: null, hvVolts: null, soc: null, battTempC: null, erangeKm: null, frangeKm: 418,
                 gLong,
                 gLat: 0.14 * Math.sin(t * 0.7),
                 pedalPct,
@@ -878,6 +1113,7 @@ class DemoGenerator {
                 driveMode: program === 'S' ? 'sport' : 'comfort',
                 ambientC: 18.5,
                 cabinTempC: 21.5,
+                cabinHvacMode: demoHvacMode,
                 gearboxOilC: 72 + warm * 14,
                 v12: 14.1,
                 soc12: 84,
@@ -931,6 +1167,7 @@ class DemoGenerator {
         return {
             speedKmh, rpm, gear, stage, program,
             hvKw,
+            hvVolts: 364,
             soc: 68 - Math.floor((cycle % 48) * 0.12),
             battTempC: 23.5,
             oilTempC,
@@ -953,6 +1190,7 @@ class DemoGenerator {
             driveMode,
             ambientC: 21.5,
             cabinTempC: 22.0,
+            cabinHvacMode: demoHvacMode,
             gearboxOilC: 76,
             v12: 13.8,
             soc12: 86,
@@ -986,6 +1224,7 @@ class SignalHub {
         this.mediaTracker = new MediaTracker();
         this.leadTracker = new LeadVehicleTracker();
         this.live = { tpms: {}, brakeRestVal: null, rawBraking: null };
+        this.hvacState = createHvacState();
         this.chargingRaw = { _shorePowerSince: 0 };
         this.tpmsRaw = { p: {}, target: {}, temp: {}, psiSeen: false };
         this.dsc = {
@@ -1329,6 +1568,14 @@ class SignalHub {
             else if (s === 4 || s === 'LADEN_BEENDET' || s === 'LADEBEENDET') c.lscStatus = 'done';
             else if (s === 5 || s === 'LADEFEHLER') c.lscStatus = 'error';
             else if (s === 0 || s === 'KEIN_LADEN') c.lscStatus = 'none';
+            const ph = v.amountPhasesCharging;
+            if (ph === 1 || ph === 'EIN_PHASIG') c.phases = 1;
+            else if (ph === 2 || ph === 'ZWEI_PHASIG') c.phases = 2;
+            else if (ph === 3 || ph === 'DREI_PHASIG') c.phases = 3;
+            else if (ph === 0 || ph === 'KEIN_LADEN') c.phases = null;
+            const pr = v.statusPreConditioningReleaseAct;
+            if (pr === 1 || pr === 'VOKO_AKTIV') c.preconActive = true;
+            else if (pr === 0 || pr === 'VOKO_NICHT_AKTIV') c.preconActive = false;
             if (typeof v.predictionChargingDuration === 'number' && v.predictionChargingDuration > 0 && v.predictionChargingDuration < 65000) {
                 c.predDurMin = v.predictionChargingDuration;
             }
@@ -1608,7 +1855,45 @@ class SignalHub {
                     markReal();
                 }
             },
-        }, () => { this.live.cabinTempC = undefined; });
+            statusACFront: (v) => {
+                feedHvacClimate2(this.hvacState, 'statusACFront', v);
+                markReal();
+            },
+            statusACFrontFunctions: (v) => {
+                feedHvacClimate2(this.hvacState, 'statusACFrontFunctions', v);
+                markReal();
+            },
+            statusAirConditionDRStatus: (v) => {
+                feedHvacClimate2(this.hvacState, 'statusAirConditionDRStatus', v);
+                markReal();
+            },
+            statusActualValuePowerACCompressor: (v) => {
+                feedHvacClimate2(this.hvacState, 'statusActualValuePowerACCompressor', v);
+                markReal();
+            },
+        }, () => {
+            this.live.cabinTempC = undefined;
+            this.hvacState = createHvacState();
+        });
+
+        this._setDynSub('climateMaster', wantClimate, 'de.bmw.infotainment.climate.climatemaster.ClimateMaster', '1', {
+            statusClimateSystemOn: (v) => {
+                feedHvacClimateMaster(this.hvacState, 'statusClimateSystemOn', v);
+                markReal();
+            },
+            statusAirCondAC: (v) => {
+                feedHvacClimateMaster(this.hvacState, 'statusAirCondAC', v);
+                markReal();
+            },
+            statusAirCondMaxAC: (v) => {
+                feedHvacClimateMaster(this.hvacState, 'statusAirCondMaxAC', v);
+                markReal();
+            },
+            statusTemperature: (v) => {
+                feedHvacClimateMaster(this.hvacState, 'statusTemperature', v);
+                markReal();
+            },
+        });
 
         if (wantNav && !this._navActive) {
             this._navActive = true;
@@ -1633,6 +1918,7 @@ class SignalHub {
         return {
             gapAhead: Boolean(this._dynSubs.gapAhead),
             climate: Boolean(this._dynSubs.climate),
+            climateMaster: Boolean(this._dynSubs.climateMaster),
             media: this._mediaActive,
             nav: this._navActive,
             brakeUds: Boolean(this._demand.brakeUds),
@@ -2339,6 +2625,10 @@ class SignalHub {
             stage: l.stage || null,
         }, now);
 
+        const hvVolts = (typeof l.udsHvV === 'number' && now - (l.udsHvVT || 0) < 20000)
+            ? l.udsHvV
+            : ((typeof l.lscVolts === 'number' && now - (l.lscVoltsT || 0) < 120000) ? l.lscVolts : null);
+
         return {
             speedKmh: l.speedKmh !== undefined ? l.speedKmh : null,
             rpm: l.rpm !== undefined ? l.rpm : 0,
@@ -2346,6 +2636,7 @@ class SignalHub {
             stage: l.stage || null,
             program,
             hvKw,
+            hvVolts,
             soc,
             battTempC,
             oilTempC: l.oilTempC !== undefined ? l.oilTempC : null,
@@ -2396,6 +2687,7 @@ class SignalHub {
             driveMode: l.driveMode || 'comfort',
             ambientC: l.ambientC !== undefined ? l.ambientC : null,
             cabinTempC: l.cabinTempC !== undefined ? l.cabinTempC : null,
+            cabinHvacMode: resolveHvacMode(this.hvacState, l.cabinTempC),
             rawCabinTemp: l.rawCabinTemp !== undefined ? l.rawCabinTemp : null,
             gearboxOilC: l.gearboxOilC !== undefined ? l.gearboxOilC : null,
             v12: l.v12 !== undefined ? l.v12 : null,
@@ -2443,6 +2735,7 @@ class SignalHub {
 module.exports = {
     SignalHub, GearGuess, FastKw, DemoGenerator, LeadVehicleTracker,
     decodeStatusBattery2, decodeCabinTemp,
+    createHvacState, feedHvacClimate2, feedHvacClimateMaster, resolveHvacMode,
     computeFrictionBrake, computeChargingState, decodeDscPressure, decodeDscPedal, decodeDscRegen,
     flagActive, gearOf, stageOf, selectionOf, programOf, driveModeOf,
 };

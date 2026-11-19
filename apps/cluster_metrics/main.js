@@ -295,8 +295,10 @@ mgu.run({
             const chgKw = (typeof chg.chargeKw === 'number' && isFinite(chg.chargeKw)) ? (chg.chargeKw.toFixed(1) + ' kW') : '-- kW';
             const chgAmps = chg.maxAmps ? (' (' + Math.round(chg.maxAmps) + 'A)') : '';
             const chgRem = chg.remainText ? (' (' + chg.remainText + ' left)') : '';
+            const chgAdded = (typeof chg.addedKwh === 'number' && isFinite(chg.addedKwh)) ? (' | Added: +' + chg.addedKwh.toFixed(1) + ' kWh') : '';
+            const chgHvV = (typeof t.hvVolts === 'number' && isFinite(t.hvVolts)) ? (' | Pack: ' + Math.round(t.hvVolts) + 'V') : '';
             const chgDetail = chg.active
-                ? ('Speed: ' + chgKw + chgAmps + ' | Finish: ' + (chg.finishTimeText || '--:--') + chgRem + ' | Target: ' + (chg.targetSoc || 100) + '%')
+                ? ('Finish: ' + (chg.finishTimeText || '--:--') + chgRem + ' | Target: ' + (chg.targetSoc || 100) + '%' + chgAdded + chgHvV + ' | ' + chgKw + chgAmps)
                 : ('Plug: ' + (chg.plugConnected ? 'Connected (' + (chg.source || 'idle') + ')' : 'Unplugged') + ' | Auto widget idle');
             setTwoRow(
                 'DIAG_CHARGING',
@@ -345,13 +347,17 @@ mgu.run({
                 'SoC: ' + socStr + ' | Power: ' + kwStr + ' | Temp: ' + fmtTempAscii(t.battTempC, units) + ' | EV Range: ' + erangeStr
             );
 
+            const hvacTag = t.cabinHvacMode === 'cooling' ? ' [AC]'
+                : (t.cabinHvacMode === 'heating' ? ' [HEAT]'
+                    : (t.cabinHvacMode === 'fan' ? ' [FAN]'
+                        : (t.cabinHvacMode === 'off' ? ' [OFF]' : '')));
             setTwoRow(
                 'DIAG_TEMPS',
                 'Engine, Gearbox & Cabin Temperatures',
                 'Oil: ' + fmtTempAscii(t.oilTempC, units) +
                     ' | Cool: ' + fmtTempAscii(t.coolantTempC, units) +
                     ' | GBX: ' + fmtTempAscii(t.gearboxOilC, units) +
-                    ' | Cabin: ' + fmtTempAscii(t.cabinTempC, units) +
+                    ' | Cabin: ' + fmtTempAscii(t.cabinTempC, units) + hvacTag +
                     ' | IAT: ' + fmtTempAscii(t.iatC, units)
             );
 
