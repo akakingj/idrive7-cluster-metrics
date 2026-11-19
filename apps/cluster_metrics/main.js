@@ -24,15 +24,17 @@ function fmtTempAscii(tempC, units) {
     return asciiOnly(formatTemp(tempC, units).text);
 }
 
-function buildPreviewAlert(nowMs, startMs, units) {
-    const elapsed = Math.max(0, nowMs - startMs);
-    const step = Math.floor(elapsed / 4000) % 4;
+function buildPreviewAlertByKey(key, units) {
     const isBar = units && units.pressUnit === 'bar';
     const isF = units && units.tempUnit === 'F';
-    if (step === 0) return { id: 'tpms', severity: 'amber', label: isBar ? 'FL 1.9b' : 'FL 27psi' };
-    if (step === 1) return { id: 'tpms', severity: 'red', label: isBar ? 'FL 1.4b' : 'FL 21psi' };
-    if (step === 2) return { id: 'gbox', severity: 'amber', label: isF ? 'GBX 226\u00B0F' : 'GBX 108\u00B0C' };
-    return { id: 'v12', severity: 'red', label: '12V 11.5V' };
+    if (key === 'tpms_low') return { id: 'tpms', severity: 'amber', label: isBar ? 'FL 1.9b' : 'FL 27psi', desc: 'TPMS Low Pressure (Amber)' };
+    if (key === 'tpms_crit') return { id: 'tpms', severity: 'red', label: isBar ? 'FL 1.4b' : 'FL 21psi', desc: 'TPMS Critical Flat (Red)' };
+    if (key === 'tpms_hot') return { id: 'tpms_temp', severity: 'amber', label: isF ? 'FR 187\u00B0F' : 'FR 86\u00B0C', desc: 'TPMS Hot Tire (Amber)' };
+    if (key === 'gbx_warn') return { id: 'gbox', severity: 'amber', label: isF ? 'GBX 226\u00B0F' : 'GBX 108\u00B0C', desc: 'Gearbox Hot (Amber)' };
+    if (key === 'gbx_crit') return { id: 'gbox', severity: 'red', label: isF ? 'GBX 244\u00B0F' : 'GBX 118\u00B0C', desc: 'Gearbox Critical (Red)' };
+    if (key === 'soc12') return { id: 'soc12', severity: 'amber', label: '12V 52%', desc: '12V Battery Low % (Amber)' };
+    if (key === 'v12') return { id: 'v12', severity: 'red', label: '12V 11.5V', desc: '12V Battery Critical V (Red)' };
+    return null;
 }
 
 function createBackgroundRuntime(bg) {
@@ -69,18 +71,18 @@ function createBackgroundRuntime(bg) {
         profileEval,
         renderer,
         diagVisible: false,
-        alertPreviewStartMs: 0,
+        alertPreviewKey: null,
         alertPreviewUntilMs: 0,
         onUiTick: null,
-        toggleAlertPreview(nowMs) {
+        setAlertPreview(key, nowMs) {
             const now = typeof nowMs === 'number' ? nowMs : Date.now();
-            if (state.alertPreviewUntilMs > now) {
+            if (!key) {
+                state.alertPreviewKey = null;
                 state.alertPreviewUntilMs = 0;
-                state.alertPreviewStartMs = 0;
                 return false;
             }
-            state.alertPreviewStartMs = now;
-            state.alertPreviewUntilMs = now + 16000;
+            state.alertPreviewKey = key;
+            state.alertPreviewUntilMs = now + 30000;
             return true;
         },
         computeModel(nowMs) {
@@ -99,10 +101,11 @@ function createBackgroundRuntime(bg) {
             }, now);
             let previewAlert = null;
             let alertPreviewRemSec = 0;
-            if (state.alertPreviewUntilMs > now) {
-                previewAlert = buildPreviewAlert(now, state.alertPreviewStartMs, units);
+            if (state.alertPreviewKey && state.alertPreviewUntilMs > now) {
+                previewAlert = buildPreviewAlertByKey(state.alertPreviewKey, units);
                 alertPreviewRemSec = Math.ceil((state.alertPreviewUntilMs - now) / 1000);
             } else if (state.alertPreviewUntilMs > 0) {
+                state.alertPreviewKey = null;
                 state.alertPreviewUntilMs = 0;
             }
             return { telemetry, units, profile, efficiency, previewAlert, alertPreviewRemSec };
@@ -159,13 +162,13 @@ mgu.run({
 
         let mainVisible = true;
         let clusterVisible = false;
+        let alertsVisible = false;
         let diagVisible = false;
         let lastProbeActive = false;
         let lastMainUpdate = 0;
         let lastDiagUpdate = 0;
         let lastChargingActive = null;
         let lastPanelModeVis = null;
-        let lastPreviewBtnText = '';
         const lastRowCache = Object.create(null);
 
         function setTwoRow(name, row1, row2) {
@@ -201,14 +204,21 @@ mgu.run({
             ui.checked('WIDGET_CHARGING', active);
         }
 
-        function syncPreviewAlertButton(model) {
+        function syncAlertPreviewStatus(model) {
+            const pa = model && model.previewAlert;
             const rem = model && model.alertPreviewRemSec ? model.alertPreviewRemSec : 0;
-            const label = rem > 0
-                ? ('Previewing ' + asciiOnly(model.previewAlert ? model.previewAlert.label : '') + ' (' + rem + 's - tap to stop)')
-                : 'Preview smart alerts (16s)';
-            if (label !== lastPreviewBtnText) {
-                lastPreviewBtnText = label;
-                ui.text('BTN_PREVIEW_ALERTS', label);
+            if (pa && rem > 0) {
+                setTwoRow(
+                    'ALERT_PREVIEW_STATUS',
+                    'Showing: ' + pa.label + ' (' + rem + 's left)',
+                    (pa.desc || 'Preview active') + ' - visible on Cluster & HUD'
+                );
+            } else {
+                setTwoRow(
+                    'ALERT_PREVIEW_STATUS',
+                    'No Alert Preview Active',
+                    'Tap any alert below to preview it on Cluster & HUD for 30s'
+                );
             }
         }
 
@@ -472,7 +482,7 @@ mgu.run({
 
             syncChargingWidgetCheckbox(model, clusterVisible || forceUi);
             syncClusterModeVisibility(clusterVisible || forceUi);
-            syncPreviewAlertButton(model);
+            if (alertsVisible || forceUi) syncAlertPreviewStatus(model);
 
             if ((mainVisible || forceUi) && (forceUi || now - lastMainUpdate >= 1000)) {
                 lastMainUpdate = now;
@@ -485,13 +495,30 @@ mgu.run({
         };
 
         ui.onClick('TAB_GENERAL', () => {
-            syncPreviewAlertButton(computeModel(Date.now()));
             ui.open('GENERAL');
         });
 
-        ui.onClick('BTN_PREVIEW_ALERTS', () => {
-            runtime.toggleAlertPreview(Date.now());
-            tick(Date.now(), true);
+        ui.onClick('BTN_ALERTS_MENU', () => {
+            alertsVisible = true;
+            syncAlertPreviewStatus(computeModel(Date.now()));
+            ui.open('ALERTS');
+        });
+
+        const alertButtons = [
+            ['ALERT_TPMS_LOW', 'tpms_low'],
+            ['ALERT_TPMS_CRIT', 'tpms_crit'],
+            ['ALERT_TPMS_HOT', 'tpms_hot'],
+            ['ALERT_GBX_WARN', 'gbx_warn'],
+            ['ALERT_GBX_CRIT', 'gbx_crit'],
+            ['ALERT_12V_SOC', 'soc12'],
+            ['ALERT_12V_VOLT', 'v12'],
+            ['ALERT_CLEAR', null],
+        ];
+        alertButtons.forEach((pair) => {
+            ui.onClick(pair[0], () => {
+                runtime.setAlertPreview(pair[1], Date.now());
+                tick(Date.now(), true);
+            });
         });
 
         ui.onClick('TAB_CLUSTER', () => {
@@ -547,6 +574,9 @@ mgu.run({
                     syncClusterModeVisibility(true);
                     syncChargingWidgetCheckbox(computeModel(Date.now()), true);
                 }
+            } else if (name === 'ALERTS') {
+                alertsVisible = shown;
+                if (shown) syncAlertPreviewStatus(computeModel(Date.now()));
             } else if (name === 'DIAG') {
                 diagVisible = shown;
                 runtime.diagVisible = shown;

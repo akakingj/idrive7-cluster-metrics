@@ -46,7 +46,7 @@ const { ClusterRender } = require(VENDOR_FILES['./cluster_render_client']);
 const {
     SignalHub, FastKw, LeadVehicleTracker, decodeStatusBattery2, decodeCabinTemp,
     createHvacState, feedHvacClimate2, feedHvacClimateMaster, resolveHvacMode,
-    calcCarClockOffsetMin, resolveTimeZoneOffsetMin,
+    calcCarClockOffsetMin,
     computeFrictionBrake, computeChargingState, decodeDscPressure, decodeDscPedal, decodeDscRegen, flagActive,
 } = require(path.join(APP_DIR, 'signals'));
 const { NavTracker, parseHudStatusText, parseWazeHudShowing } = require(path.join(APP_DIR, 'nav_tracker'));
@@ -232,7 +232,7 @@ function inBox(x, y, box) {
             r.render(modelBase, { enabled: true, gearDisplay: 'next_to_d', clusterNudgeX: nudgeX }, 1000);
             assert.strictEqual(r.layers.gear_d.visible, true);
             const gd = r.layers.gear_d;
-            assert(gd.rect.x >= 1427 && gd.rect.x <= 1435, 'gear_d layer rect must sit snugly next to D (1427..1435), got x=' + gd.rect.x);
+            assert(gd.rect.x >= 1429 && gd.rect.x <= 1438, 'gear_d layer rect must sit snugly next to D (1429..1438), got x=' + gd.rect.x);
             assert(gd.rect.x + gd.rect.w <= r.layers.cabin_temp.rect.x || !r.layers.cabin_temp.visible || gd.rect.x < r.layers.cabin_temp.rect.x,
                 'gear_d must sit strictly left of cabin_temp');
             const gdd = gd.cv.d;
@@ -2071,10 +2071,7 @@ function inBox(x, y, box) {
         // A. Timezone offset from car clock (13:44 PST when UTC is 21:44 -> -480 min)
         const utc2144 = Date.UTC(2026, 10, 19, 21, 44, 0); // Nov 19, 2026 21:44 UTC = 13:44 PST
         assert.strictEqual(calcCarClockOffsetMin(13, 44, utc2144), -480);
-        assert.strictEqual(resolveTimeZoneOffsetMin('auto', -480, utc2144), -480);
-        assert.strictEqual(resolveTimeZoneOffsetMin('pacific', null, utc2144), -480);
-        // Daylight saving in July (PDT = UTC-7 = -420 min)
-        assert.strictEqual(resolveTimeZoneOffsetMin('pacific', null, Date.UTC(2026, 6, 15, 20, 0, 0)), -420);
+        assert.strictEqual(calcCarClockOffsetMin(22, 44, utc2144), 60);
 
         // With 85 min remaining at 13:44 PST (21:44 UTC), Est. Finish MUST be 15:09 (NEVER 23:09 UTC!)
         const tzRaw = { wirePlugged: true, plugLocked: true, lscStatus: 'active', residualMin: 85, targetSoc: 100 };

@@ -43,15 +43,15 @@ const DEFAULT_WAZE_STATUS = '/run/waze-on-cluster/status.json';
 // Shifted +16px down so there is generous breathing room under the main digital speed digits while clearing the traffic light sign (>=536)
 const BELOW_SPEED_BASE = { x: 392, y: 445, w: 214, h: 84 };
 // Snugly right of KOMBI4's single-letter 'D' (1400..1424; GEAR_WIN 1380..1426). Hidden in S/M where BMW renders S1..S8 natively.
-const GEAR_D_BASE = { x: 1429, y: 650, w: 30, h: 56 };
-// Stacked OEM 'CABIN' micro-header + HVAC-colored interior temperature between gear_d (1429..1459) and stock ambient (+57°F at 1540+)
-const CABIN_TEMP_BASE = { x: 1458, y: 654, w: 74, h: 50 };
+const GEAR_D_BASE = { x: 1432, y: 650, w: 28, h: 56 };
+// Stacked OEM 'CABIN' micro-header + HVAC-colored interior temperature between gear_d (1432..1460) and stock ambient (+57°F at 1540+)
+const CABIN_TEMP_BASE = { x: 1462, y: 654, w: 72, h: 50 };
 const BRAKE_RAIL_BASE = { x: 1280, y: 609, w: 296, h: 31 };
 const CORNER_LEFT_BASE = { x: 8, y: 643, w: 116, h: 66 };
 // Bottom-right corner readout below battery icon (12V SoC % by default now that PHEV HV SoC overlays the HV battery gauge)
 const CORNER_RIGHT_BASE = { x: 1816, y: 646, w: 98, h: 66 };
-// PHEV-only HV Battery SoC % overlay centered inside the dark pocket of the bottom-right HV battery sub-gauge (between 100 and 50)
-const HV_SOC_GAUGE_BASE = { x: 1794, y: 482, w: 92, h: 58 };
+// PHEV-only HV Battery SoC % overlay centered inside the upper dark pocket of the bottom-right HV battery sub-gauge (well above the 50 mark)
+const HV_SOC_GAUGE_BASE = { x: 1796, y: 452, w: 92, h: 56 };
 // Right-Wing Gauge & Widget pocket (1252..1788, 88..604): full-wing gauge-edge artwork backdrop (no darkened border)
 // with foreground cover & text centered at world x=1438 (cover 1366..1510, y=184..328)
 const RIGHT_WIDGET_BASE = { x: 1252, y: 88, w: 536, h: 516 };
@@ -779,9 +779,9 @@ class OverlayRenderer {
             this._setVisible('below_speed', true);
             this._upload('below_speed');
 
-            // 1b. Zone 2: Shift Position Snugly Next to Stock 'D' (1429..1459, 650..706; strictly x >= 1427 clear of GEAR_WIN)
+            // 1b. Zone 2: Shift Position Snugly Next to Stock 'D' (1432..1460, 650..706; strictly x >= 1429 clear of GEAR_WIN 1426)
             const gdRect = {
-                x: clamp(GEAR_D_BASE.x + cx, 1427, 1435),
+                x: clamp(GEAR_D_BASE.x + cx, 1429, 1438),
                 y: clamp(GEAR_D_BASE.y + cy, 648, 654),
                 w: GEAR_D_BASE.w,
                 h: GEAR_D_BASE.h,
@@ -797,10 +797,10 @@ class OverlayRenderer {
                 this._setVisible('gear_d', false);
             }
 
-            // 1b2. Stacked 'CABIN' Interior Temperature Left of Ambient Temp (1458..1532, 654..704; HVAC-mode colored)
+            // 1b2. Stacked 'CABIN' Interior Temperature Left of Ambient Temp (1462..1534, 654..704; HVAC-mode colored)
             if (showCabinTemp) {
                 const ctRect = {
-                    x: clamp(CABIN_TEMP_BASE.x + cx, 1457, 1463),
+                    x: clamp(CABIN_TEMP_BASE.x + cx, 1460, 1466),
                     y: clamp(CABIN_TEMP_BASE.y + cy, 650, 658),
                     w: CABIN_TEMP_BASE.w,
                     h: CABIN_TEMP_BASE.h,
@@ -862,11 +862,11 @@ class OverlayRenderer {
                 this._setVisible('corner_right', false);
             }
 
-            // 1e2. PHEV HV Battery SoC % Overlay Inside HV Battery Sub-Gauge (1794..1886, 482..540; PHEV only)
+            // 1e2. PHEV HV Battery SoC % Overlay Inside HV Battery Sub-Gauge (1796..1888, 452..508; well above 50 mark)
             if (showHvSocGauge) {
                 const hgRect = {
-                    x: clamp(HV_SOC_GAUGE_BASE.x + cx, 1786, 1802),
-                    y: clamp(HV_SOC_GAUGE_BASE.y + cy, 476, 488),
+                    x: clamp(HV_SOC_GAUGE_BASE.x + cx, 1788, 1804),
+                    y: clamp(HV_SOC_GAUGE_BASE.y + cy, 446, 458),
                     w: HV_SOC_GAUGE_BASE.w,
                     h: HV_SOC_GAUGE_BASE.h,
                 };
@@ -1134,7 +1134,7 @@ class OverlayRenderer {
         const numPart = String(tf.value);
         const unitPart = tf.unit;
         const pal = cabinHvacPalette(hvacMode);
-        const cx = 40;
+        const cx = 38;
 
         drawTextOutline(cv, 'CABIN', cx, 17, 12, '#9ab0c9', { font: 'bold', align: 'center' });
 
@@ -1142,7 +1142,7 @@ class OverlayRenderer {
         let unitSz = 15;
         let nw = cv.textWidth(numPart, numSz, { font: 'bold' });
         let uw = cv.textWidth(unitPart, unitSz, { font: 'bold' });
-        if (nw + uw + 2 > 66) {
+        if (nw + uw + 2 > 64) {
             numSz = 20;
             unitSz = 14;
             nw = cv.textWidth(numPart, numSz, { font: 'bold' });
@@ -1155,13 +1155,14 @@ class OverlayRenderer {
     }
 
     /**
-     * PHEV-only HV Battery State of Charge (%) centered inside the dark pocket of the bottom-right HV battery gauge.
+     * PHEV-only HV Battery State of Charge (%) centered in the upper dark pocket of the bottom-right HV battery gauge,
+     * with the 'SOC' micro-label tucked tightly above the digits and ample clearance above the '50' mark.
      */
     _paintHvSocGauge(cv, soc) {
         cv.clear(COL.clear);
         const pct = clamp(Math.round(soc), 0, 100);
         const col = pct <= 10 ? COL.red : (pct <= 20 ? COL.amber : COL.white);
-        drawTextOutline(cv, 'SOC', 46, 16, 13, COL.tagBlue, { font: 'bold', align: 'center' });
+        drawTextOutline(cv, 'SOC', 46, 20, 13, COL.tagBlue, { font: 'bold', align: 'center' });
         drawTextOutline(cv, pct + '%', 46, 47, 29, col, { font: 'num', align: 'center' });
     }
 

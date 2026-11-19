@@ -2,7 +2,7 @@
   "id": "cluster_metrics",
   "title": "Cluster Metrics",
   "description": "Real-time efficiency, HV battery %, powertrain temperatures, gear in D, full-wing Right-Wing Media/Charging/Trip widget, HUD turn-by-turn nav, and live DSC hydraulic brake indicator for BMW iDrive 7",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "autostart": true,
   "license": "GPL-3.0-only",
   "vendor": "chyiz",
@@ -273,10 +273,9 @@
         "smartAlerts",
         [
           "button",
-          "BTN_PREVIEW_ALERTS",
-          "Preview smart alerts (16s)"
+          "BTN_ALERTS_MENU",
+          "Preview smart alerts..."
         ],
-        "timeZone",
         "unitSystem",
         "tempUnit",
         "evEffUnit",
@@ -285,6 +284,59 @@
         "coldOilC",
         "vehicle",
         "demo"
+      ]
+    },
+    {
+      "name": "ALERTS",
+      "kind": "menu",
+      "title": "Smart Alert Previews",
+      "repoLink": false,
+      "items": [
+        [
+          "tworow",
+          "ALERT_PREVIEW_STATUS",
+          "Active Alert Preview"
+        ],
+        [
+          "button",
+          "ALERT_TPMS_LOW",
+          "TPMS Low Pressure (Amber)"
+        ],
+        [
+          "button",
+          "ALERT_TPMS_CRIT",
+          "TPMS Critical Flat (Red)"
+        ],
+        [
+          "button",
+          "ALERT_TPMS_HOT",
+          "TPMS Hot Tire (Amber)"
+        ],
+        [
+          "button",
+          "ALERT_GBX_WARN",
+          "Gearbox Hot (Amber)"
+        ],
+        [
+          "button",
+          "ALERT_GBX_CRIT",
+          "Gearbox Critical (Red)"
+        ],
+        [
+          "button",
+          "ALERT_12V_SOC",
+          "12V Battery Low % (Amber)"
+        ],
+        [
+          "button",
+          "ALERT_12V_VOLT",
+          "12V Battery Critical V (Red)"
+        ],
+        [
+          "button",
+          "ALERT_CLEAR",
+          "Clear Active Preview"
+        ]
       ]
     },
     {
@@ -966,74 +1018,6 @@
         4,
         8,
         12
-      ]
-    },
-    {
-      "key": "timeZone",
-      "label": "Time zone (charging finish clock)",
-      "type": "choice",
-      "default": "auto",
-      "options": [
-        [
-          "auto",
-          "Auto (from car clock)"
-        ],
-        [
-          "pacific",
-          "US Pacific (PT)"
-        ],
-        [
-          "mountain",
-          "US Mountain (MT)"
-        ],
-        [
-          "arizona",
-          "US Arizona (MST)"
-        ],
-        [
-          "central",
-          "US Central (CT)"
-        ],
-        [
-          "eastern",
-          "US Eastern (ET)"
-        ],
-        [
-          "atlantic",
-          "Atlantic (AT)"
-        ],
-        [
-          "alaska",
-          "Alaska (AKT)"
-        ],
-        [
-          "hawaii",
-          "Hawaii (HST)"
-        ],
-        [
-          "utc",
-          "UTC"
-        ],
-        [
-          "uk",
-          "UK (GMT/BST)"
-        ],
-        [
-          "cet",
-          "Central Europe (CET/CEST)"
-        ],
-        [
-          "eet",
-          "Eastern Europe (EET/EEST)"
-        ],
-        [
-          "cst_cn",
-          "China / Singapore (UTC+8)"
-        ],
-        [
-          "jst",
-          "Japan / Korea (UTC+9)"
-        ]
       ]
     },
     {

@@ -629,45 +629,6 @@ class LeadVehicleTracker {
     }
 }
 
-const TZ_DEFS = {
-    pacific:  { off: -8, dst: 'us' },
-    mountain: { off: -7, dst: 'us' },
-    arizona:  { off: -7, dst: null },
-    central:  { off: -6, dst: 'us' },
-    eastern:  { off: -5, dst: 'us' },
-    atlantic: { off: -4, dst: 'us' },
-    alaska:   { off: -9, dst: 'us' },
-    hawaii:   { off: -10, dst: null },
-    utc:      { off: 0, dst: null },
-    uk:       { off: 0, dst: 'eu' },
-    cet:      { off: 1, dst: 'eu' },
-    eet:      { off: 2, dst: 'eu' },
-    cst_cn:   { off: 8, dst: null },
-    jst:      { off: 9, dst: null },
-};
-
-function nthSundayUtc(year, month0, n) {
-    if (n > 0) {
-        const first = new Date(Date.UTC(year, month0, 1)).getUTCDay();
-        return 1 + ((7 - first) % 7) + (n - 1) * 7;
-    }
-    const lastDay = new Date(Date.UTC(year, month0 + 1, 0));
-    return lastDay.getUTCDate() - lastDay.getUTCDay();
-}
-
-function isDstActive(def, ms) {
-    if (!def || !def.dst) return false;
-    const y = new Date(ms).getUTCFullYear();
-    if (def.dst === 'eu') {
-        return ms >= Date.UTC(y, 2, nthSundayUtc(y, 2, -1), 1) &&
-            ms < Date.UTC(y, 9, nthSundayUtc(y, 9, -1), 1);
-    }
-    // US DST: 2nd Sunday of March 02:00 local -> 1st Sunday of November 02:00 local
-    const on = Date.UTC(y, 2, nthSundayUtc(y, 2, 2), 2) - def.off * 3600000;
-    const off = Date.UTC(y, 10, nthSundayUtc(y, 10, 1), 2) - (def.off + 1) * 3600000;
-    return ms >= on && ms < off;
-}
-
 /**
  * Derive signed UTC offset (minutes, snapped to 15-min timezone increments) by comparing
  * BMW's local clock (`AutoTime.current` or `KombiIF.timeDate`) against JS UTC time.
@@ -684,24 +645,6 @@ function calcCarClockOffsetMin(hour, minute, nowMs) {
     if (diff > 720) diff -= 1440;
     const snapped = Math.round(diff / 15) * 15;
     return (snapped >= -720 && snapped <= 840) ? snapped : null;
-}
-
-/**
- * Resolve effective local clock offset (minutes from UTC, or null to fall back to OS local Date).
- */
-function resolveTimeZoneOffsetMin(tzSetting, carOffsetMin, nowMs) {
-    const ms = typeof nowMs === 'number' && isFinite(nowMs) ? nowMs : Date.now();
-    const key = String(tzSetting || 'auto');
-    if (key !== 'auto') {
-        const def = TZ_DEFS[key];
-        if (def) return (def.off + (isDstActive(def, ms) ? 1 : 0)) * 60;
-        const m = /^utc([+-]\d+(?:\.\d+)?)$/i.exec(key);
-        if (m) return Math.round(Number(m[1]) * 60);
-    }
-    if (typeof carOffsetMin === 'number' && isFinite(carOffsetMin) && carOffsetMin >= -720 && carOffsetMin <= 840) {
-        return Math.round(carOffsetMin);
-    }
-    return null;
 }
 
 function localHmFromMs(ms, localOffsetMin) {
@@ -2800,8 +2743,8 @@ class SignalHub {
         const hudNav = this.navTracker.snapshot(now);
         const navRouteActive = hudNav.routeActive;
         const navHasLanes = hudNav.hasLanes;
-        const tzSetting = (this.ctx.settings && this.ctx.settings.get('timeZone')) || 'auto';
-        const localClockOffsetMin = resolveTimeZoneOffsetMin(tzSetting, l.carClockOffsetMin, now);
+        const localClockOffsetMin = (typeof l.carClockOffsetMin === 'number' && isFinite(l.carClockOffsetMin))
+            ? l.carClockOffsetMin : null;
         const charging = computeChargingState(this.chargingRaw, {
             speedKmh,
             rpm: l.rpm !== undefined ? l.rpm : 0,
@@ -2924,7 +2867,7 @@ module.exports = {
     SignalHub, GearGuess, FastKw, DemoGenerator, LeadVehicleTracker,
     decodeStatusBattery2, decodeCabinTemp,
     createHvacState, feedHvacClimate2, feedHvacClimateMaster, resolveHvacMode,
-    calcCarClockOffsetMin, resolveTimeZoneOffsetMin,
+    calcCarClockOffsetMin,
     computeFrictionBrake, computeChargingState, decodeDscPressure, decodeDscPedal, decodeDscRegen,
     flagActive, gearOf, stageOf, selectionOf, programOf, driveModeOf,
 };
