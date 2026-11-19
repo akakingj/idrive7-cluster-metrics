@@ -1,0 +1,13 @@
+{
+  "name": "idrive7-cluster-metrics",
+  "version": "0.7.1",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "scripts": {
+    "build": "python3 vendor/cauliflowermossgrape-idrive7-apps/kit/tools/build.py --stub-sdk cluster_metrics",
+    "test": "node test/run_tests.js"
+  },
+  "devDependencies": {
+    "jpeg-js": "0.4.4"
+  }
+}
