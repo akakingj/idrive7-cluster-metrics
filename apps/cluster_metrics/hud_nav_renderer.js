@@ -222,6 +222,10 @@ function measureRoadShield(cv, sh, h) {
     const num = foldAscii(sh && sh.num ? sh.num : '');
     if (!num) return 0;
     const sz = shieldFontSize(num, hh);
+    if (sh && sh.kind === 'state') {
+        const minW = hh <= 26 ? 38 : 46;
+        return Math.max(minW, Math.round(cv.textWidth(num, sz, ROPTS) + 22));
+    }
     const minW = hh <= 26 ? 32 : 38;
     return Math.max(minW, Math.round(cv.textWidth(num, sz, ROPTS) + 16));
 }
@@ -312,6 +316,18 @@ function drawRoadShield(cv, sh, x, y, h) {
     const kind = (sh && sh.kind) || 'us';
     const bw = measureRoadShield(cv, sh, hh);
     const sz = shieldFontSize(num, hh);
+
+    if (kind === 'state') {
+        // MUTCD M1-5 State Route marker: elongated white circle / stadium pill with crisp dark border & black digits
+        const ph = hh - 4;
+        const py = y + 2;
+        const rad = Math.floor(ph / 2);
+        cv.roundRect(x - 1, py - 1, bw + 2, ph + 2, rad + 1, OUTLINE);
+        cv.roundRect(x, py, bw, ph, rad, SHIELD_WHITE);
+        cv.strokeRoundRect(x + 1, py + 1, bw - 2, ph - 2, Math.max(2, rad - 1), 1.5, SHIELD_INK);
+        cv.text(num, Math.round(x + bw / 2), Math.round(py + ph - (hh <= 26 ? 5 : 7)), sz, SHIELD_INK, COPTS);
+        return bw;
+    }
 
     if (kind === 'eu_blue' || kind === 'eu_green') {
         const fill = kind === 'eu_green' ? SHIELD_GREEN : SHIELD_BLUE;
