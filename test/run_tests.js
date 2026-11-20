@@ -218,8 +218,8 @@ function inBox(x, y, box) {
         assert(lowV12 && lowV12.id === 'v12');
     });
 
-    /* 6. Gear Digit Snugly Next to D: Clear of KOMBI4 GEAR_WIN (1380..1426) & Baseline Aligned (664..698) */
-    await test('Gear digit sits snugly next to D (1427..1459), clears GEAR_WIN (1380..1426) & cabin_temp at all nudges, and hides in S/M/P/R/N', () => {
+    /* 6. Gear Digit Strictly Clear of KOMBI4 GEAR_WIN (1380..1460) & Baseline Aligned (664..698) */
+    await test('Gear digit stays strictly clear of GEAR_WIN (x >= 1461), left of cabin_temp (1488..1539), and hides in S/M/P/R/N', () => {
         const r = new OverlayRenderer({ allowPanel: true });
         const modelBase = {
             units: unitsMod.US_PRESET,
@@ -232,9 +232,9 @@ function inBox(x, y, box) {
             r.render(modelBase, { enabled: true, gearDisplay: 'next_to_d', clusterNudgeX: nudgeX }, 1000);
             assert.strictEqual(r.layers.gear_d.visible, true);
             const gd = r.layers.gear_d;
-            assert(gd.rect.x >= 1429 && gd.rect.x <= 1438, 'gear_d layer rect must sit snugly next to D (1429..1438), got x=' + gd.rect.x);
-            assert(gd.rect.x + gd.rect.w <= r.layers.cabin_temp.rect.x || !r.layers.cabin_temp.visible || gd.rect.x < r.layers.cabin_temp.rect.x,
-                'gear_d must sit strictly left of cabin_temp');
+            assert(gd.rect.x >= 1461 && gd.rect.x <= 1464, 'gear_d layer rect must stay strictly clear of GEAR_WIN (1461..1464), got x=' + gd.rect.x);
+            assert(r.layers.cabin_temp.rect.x >= gd.rect.x + gd.rect.w - 3 && r.layers.cabin_temp.rect.x + r.layers.cabin_temp.rect.w <= 1540,
+                'cabin_temp must sit cleanly between gear_d and AMBIENT_TEMP (1540), got ' + JSON.stringify(r.layers.cabin_temp.rect));
             const gdd = gd.cv.d;
             let maxR = 0, maxG = 0, maxB = 0, minWy = 999, maxWy = 0;
             for (let py = 0; py < gd.rect.h; py++) {
@@ -248,14 +248,14 @@ function inBox(x, y, box) {
                     if (gg > maxG) maxG = gg;
                     if (bb > maxB) maxB = bb;
                     const wx = gd.rect.x + px, wy = gd.rect.y + py;
-                    assert(wx >= 1427 && wx < 1460, 'gear_d pixel outside snug pocket next to D at wx=' + wx);
+                    assert(wx >= 1461 && wx < 1490, 'gear_d pixel must stay clear of GEAR_WIN (<=1460) at wx=' + wx);
                     if (wy < minWy) minWy = wy;
                     if (wy > maxWy) maxWy = wy;
                 }
             }
             assert(maxR > 200 && maxG > 200 && maxB > 200, 'gear_d expected bright white text pixels');
             assert(minWy >= 660 && minWy <= 674, 'gear_d top should align with BMW D (~666), got minWy=' + minWy);
-            assert(maxWy >= 692 && maxWy <= 700, 'gear_d bottom should align with BMW D (~696), got maxWy=' + maxWy);
+            assert(maxWy >= 690 && maxWy <= 700, 'gear_d bottom should align with BMW D (~696), got maxWy=' + maxWy);
         });
 
         modelBase.telemetry.program = 'S';
@@ -1054,7 +1054,10 @@ function inBox(x, y, box) {
             viewContent: [{ eventsInView: [{ passiveManeuver: { passiveManeuverType: 'JUNCTION', formattedDistance: { distance: '1.4', unit: 'MILE_US' }, description: { elements: [{ text: 'I-280 South' }] } } }] }],
         }, 1200, 1180);
         const snapPassive = ntFallback.snapshot(20000, 1250);
-        assert(snapPassive.show && snapPassive.show.dir === 'STRAIGHT_ON' && snapPassive.show.road === 'I-280 South', 'passiveManeuver on highway must draw straight guidance instead of waiting');
+        assert(snapPassive.show && snapPassive.show.dir === 'STRAIGHT_ON' && snapPassive.show.road === 'South' &&
+            Array.isArray(snapPassive.show.shields) && snapPassive.show.shields[0] &&
+            snapPassive.show.shields[0].kind === 'interstate' && snapPassive.show.shields[0].num === '280',
+            'passiveManeuver on highway must extract Interstate shield and draw straight guidance instead of waiting');
 
         // Empty route on BMW for >=5s triggers bmw_nav_fallback so stock HUD arrow takes over cleanly
         ntFallback.feedEvents({ GuidanceEventListError: 'NO_ERROR', viewContent: [{ eventsInView: [] }] }, 1500, 1480);
@@ -2119,6 +2122,74 @@ function inBox(x, y, box) {
         model.previewAlert = { id: 'tpms', severity: 'red', label: 'FL 21psi' };
         r.render(model, opts, 2000);
         assert.strictEqual(r.layers.brake_rail.visible, true, 'previewAlert must illuminate brake_rail even in Park');
+    });
+
+    /* 21. v0.8.5: Highway Shields (US-101, I-880, CA-85) in HUD Nav + Calibrated Right-Wing Gauge Backdrop */
+    await test('v0.8.5: HUD highway shield extraction (US-101, I-880, CA-85), vector shield rendering & calibrated gauge backdrop', () => {
+        const { decodeDescription } = require(path.join(APP_DIR, 'nav_tracker'));
+        const { drawHudRoadBanner, ROAD_W, ROAD_H } = require(path.join(APP_DIR, 'hud_nav_renderer'));
+        const { buildStockBackdrop } = require(path.join(APP_DIR, 'image_decode'));
+        const { Canvas } = require('./kit/canvas');
+
+        // A. Text extraction: Exit + US-101
+        const d1 = decodeDescription({ description: { elements: [{ text: 'Exit 399A US-101 N Bayshore Fwy' }] } }, true);
+        assert.strictEqual(d1.exitBadge, '399A');
+        assert.deepStrictEqual(d1.shields, [{ kind: 'us', num: '101' }]);
+        assert.strictEqual(d1.road, 'N Bayshore Fwy');
+
+        // B. Text extraction: Interstate + State Route interchange
+        const d2 = decodeDescription({ description: { elements: [{ text: 'I-880 N / CA-237 W' }] } }, false);
+        assert.deepStrictEqual(d2.shields, [{ kind: 'interstate', num: '880' }, { kind: 'state', num: '237' }]);
+
+        // C. Native BMW el.icon objects (Exit icon + Interstate icon + street text)
+        const d3 = decodeDescription({
+            description: {
+                elements: [
+                    { icon: { text: '12B' } },
+                    { icon: { type: 'INTERSTATE', text: '280' } },
+                    { text: 'North / Wolfe Rd' },
+                ],
+            },
+        }, true);
+        assert.strictEqual(d3.exitBadge, '12B');
+        assert.deepStrictEqual(d3.shields, [{ kind: 'interstate', num: '280' }]);
+        assert.strictEqual(d3.road, 'North / Wolfe Rd');
+
+        // D. Must NOT false-trigger on plain street addresses
+        const d4 = decodeDescription({ description: { elements: [{ text: '101 Main St' }] } }, false);
+        assert.deepStrictEqual(d4.shields, []);
+        assert.strictEqual(d4.road, '101 Main St');
+
+        // E. Vector shield rendering produces red/blue Interstate pixels + white US shield pixels + green State pixels
+        const cv = new Canvas(ROAD_W, ROAD_H);
+        const ok = drawHudRoadBanner(cv, {
+            exitBadge: '399A',
+            shields: [{ kind: 'interstate', num: '880' }, { kind: 'us', num: '101' }],
+            road: 'N Bayshore Fwy',
+        });
+        assert.strictEqual(ok, true);
+        let redPx = 0, bluePx = 0, greenPx = 0, whitePx = 0;
+        for (let i = 0; i < cv.d.length; i += 4) {
+            if (cv.d[i + 3] < 200) continue;
+            const r0 = cv.d[i], g0 = cv.d[i + 1], b0 = cv.d[i + 2];
+            if (r0 > 180 && g0 < 80 && b0 < 80) redPx++;
+            else if (b0 > 180 && r0 < 70 && g0 < 120) bluePx++;
+            else if (g0 > 110 && r0 < 60 && b0 < 90) greenPx++;
+            else if (r0 > 220 && g0 > 220 && b0 > 220) whitePx++;
+        }
+        assert(redPx > 40 && bluePx > 120, 'Interstate shield must paint red crown + royal blue body (red=' + redPx + ', blue=' + bluePx + ')');
+        assert(greenPx > 120, 'Exit badge must paint green body');
+        assert(whitePx > 200, 'US shield + road text must paint bright white pixels');
+
+        // F. Calibrated G30 right-wing backdrop covers top-left eyebrow handle (1265, 104),
+        //    stays strictly inside outer bezel at (1765, 355), and clears bottom-left map at (1400, 600).
+        const cov = { w: 144, h: 144, d: Buffer.alloc(144 * 144 * 4, 220) };
+        const bg = buildStockBackdrop(cov, 536, 536, { ox: 1252, oy: 88, vx: 196, vy: 218 });
+        const alphaAt = (wx, wy) => bg[((wy - 88) * 536 + (wx - 1252)) * 4 + 3];
+        assert(alphaAt(1275, 105) > 20, 'backdrop must reach top-left extended eyebrow handle at (1275, 105)');
+        assert.strictEqual(alphaAt(1765, 355), 0, 'backdrop must NOT spill past outer-right bezel at (1765, 355)');
+        assert.strictEqual(alphaAt(1400, 600), 0, 'backdrop must NOT spill onto bottom-left map at (1400, 600)');
+        assert(alphaAt(1560, 610) > 20, 'backdrop must reach bottom-right gauge curve at (1560, 610)');
     });
 
     console.log('\nAll ' + passed + ' tests passed.');

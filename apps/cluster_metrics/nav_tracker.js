@@ -58,9 +58,99 @@ function safeStr(t) {
     return String(t || '').replace(/[\u0000-\u001f\u007f]/g, '').replace(/[\s\u00a0\u2000-\u200b\u202f\u205f\u3000]+/g, ' ').trim();
 }
 
+const US_STATE_CODES = 'CA|SR|WA|OR|NV|AZ|TX|NY|FL|IL|PA|OH|MI|GA|NC|VA|MA|NJ|CO|UT|MD|MN|WI|IN|MO|TN|SC|AL|LA|KY|OK|CT|IA|KS|AR|MS|NE|NM|ID|HI|NH|ME|RI|MT|DE|SD|ND|AK|VT|WY|WV|DC';
+
+function iconMetaStr(icon) {
+    if (!isObj(icon)) return '';
+    return [icon.type, icon.iconType, icon.category, icon.style, icon.shieldType, icon.roadClass]
+        .filter((v) => v !== null && v !== undefined)
+        .map((v) => String(v).toUpperCase())
+        .join(' ');
+}
+
+function classifyShieldToken(rawText, meta, fromIcon) {
+    const s = safeStr(rawText);
+    if (!s) return null;
+    const mInt = /^(?:INTERSTATE|I)[-\s]?(\d{1,3}[A-Z]?)$/i.exec(s);
+    if (mInt) return { kind: 'interstate', num: mInt[1].toUpperCase() };
+    const mUs = /^(?:U\.?S\.?(?:\s*(?:HWY|HIGHWAY|ROUTE|RTE))?)[-\s]?(\d{1,3}[A-Z]?)$/i.exec(s);
+    if (mUs) return { kind: 'us', num: mUs[1].toUpperCase() };
+    const stRe = new RegExp('^(?:' + US_STATE_CODES + '|STATE\\s+ROUTE|HWY|HIGHWAY)[\\-\\s](\\d{1,3}[A-Z]?)$', 'i');
+    const mSt = stRe.exec(s);
+    if (mSt) return { kind: 'state', num: mSt[1].toUpperCase() };
+    if (fromIcon) {
+        const mEuE = /^E[-\s]?(\d{1,3})$/i.exec(s);
+        if (mEuE) return { kind: 'eu_green', num: 'E' + mEuE[1] };
+        const mEuA = /^([AM])[-\s]?(\d{1,3})$/i.exec(s);
+        if (mEuA) return { kind: 'eu_blue', num: mEuA[1].toUpperCase() + mEuA[2] };
+        if (/^\d{1,3}[A-Z]?$/i.test(s)) {
+            if (/INTERSTATE/.test(meta)) return { kind: 'interstate', num: s.toUpperCase() };
+            if (/STATE/.test(meta)) return { kind: 'state', num: s.toUpperCase() };
+            if (/AUTOBAHN|MOTORWAY|FREEWAY/.test(meta)) return { kind: 'eu_blue', num: s.toUpperCase() };
+            return { kind: 'us', num: s.toUpperCase() };
+        }
+    }
+    return null;
+}
+
+function pushShieldUnique(list, sh) {
+    if (!sh || !sh.num || list.length >= 2) return;
+    for (let i = 0; i < list.length; i++) {
+        if (list[i].kind === sh.kind && list[i].num === sh.num) return;
+    }
+    list.push(sh);
+}
+
+function extractInlineShields(roadStr, shields) {
+    if (!roadStr) return '';
+    let s = roadStr;
+    const patterns = [
+        { kind: 'interstate', re: /\b(?:Interstate|I)[-\s](\d{1,3}[A-Z]?)\b/gi },
+        { kind: 'us', re: /\bU\.?S\.?(?:\s*(?:Hwy|Highway|Route|Rte))?[-\s](\d{1,3}[A-Z]?)\b/gi },
+        { kind: 'state', re: new RegExp('\\b(?:' + US_STATE_CODES + '|State\\s+Route|Hwy)[\\-\\s](\\d{1,3}[A-Z]?)\\b', 'gi') },
+    ];
+    // Collect matches with their string positions so left-to-right highway order is preserved
+    const hits = [];
+    for (let p = 0; p < patterns.length; p++) {
+        const pat = patterns[p];
+        pat.re.lastIndex = 0;
+        let m;
+        while ((m = pat.re.exec(s)) !== null) {
+            hits.push({ idx: m.index, end: m.index + m[0].length, kind: pat.kind, num: m[1].toUpperCase() });
+        }
+    }
+    if (!hits.length) return s;
+    hits.sort((a, b) => a.idx - b.idx);
+    const chosen = [];
+    let lastEnd = -1;
+    for (let i = 0; i < hits.length; i++) {
+        if (hits[i].idx < lastEnd) continue;
+        const prevLen = shields.length;
+        pushShieldUnique(shields, { kind: hits[i].kind, num: hits[i].num });
+        if (shields.length > prevLen || shields.some((x) => x.kind === hits[i].kind && x.num === hits[i].num)) {
+            chosen.push(hits[i]);
+            lastEnd = hits[i].end;
+        }
+    }
+    if (!chosen.length) return s;
+    let rebuilt = '';
+    let cursor = 0;
+    for (let i = 0; i < chosen.length; i++) {
+        rebuilt += s.slice(cursor, chosen[i].idx);
+        cursor = chosen[i].end;
+    }
+    rebuilt += s.slice(cursor);
+    return rebuilt
+        .replace(/\s*([\/,&\-])\s*\1+/g, ' $1 ')
+        .replace(/^[\s\/,&\-:]+|[\s\/,&\-:]+$/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
 function decodeDescription(b, isHighwayExit) {
     const els = b && b.description && Array.isArray(b.description.elements) ? b.description.elements : [];
     let exitBadge = null;
+    const shields = [];
     const parts = [];
 
     for (let i = 0; i < els.length; i++) {
@@ -69,16 +159,23 @@ function decodeDescription(b, isHighwayExit) {
         if (isObj(el.icon) && typeof el.icon.text === 'string') {
             const ic = safeStr(el.icon.text);
             if (!ic) continue;
+            const meta = iconMetaStr(el.icon);
             const exMatch = /^(?:EXIT|AUSFAHRT|SORTIE)\s+([0-9]{1,4}[A-Z]?)$/i.exec(ic);
-            if (!exitBadge && exMatch) {
-                exitBadge = exMatch[1].toUpperCase();
-            } else if (!exitBadge && i === 0 && (
+            const isExplicitExit = Boolean(exMatch || /EXIT|AUSFAHRT/.test(meta));
+            if (!exitBadge && isExplicitExit) {
+                exitBadge = (exMatch ? exMatch[1] : ic).toUpperCase();
+            } else if (!exitBadge && i === 0 && !/INTERSTATE|HIGHWAY|ROUTE|SHIELD|AUTOBAHN|MOTORWAY/.test(meta) && (
                 (isHighwayExit && /^[0-9]{1,4}[A-Z]?$/i.test(ic)) ||
                 /^[0-9]{1,4}[A-Z]$/i.test(ic)
             )) {
                 exitBadge = ic.toUpperCase();
-            } else if (parts[parts.length - 1] !== ic) {
-                parts.push(ic);
+            } else {
+                const sh = classifyShieldToken(ic, meta, true);
+                if (sh) {
+                    pushShieldUnique(shields, sh);
+                } else if (parts[parts.length - 1] !== ic) {
+                    parts.push(ic);
+                }
             }
         } else if (typeof el.text === 'string') {
             const tx = safeStr(el.text);
@@ -94,7 +191,10 @@ function decodeDescription(b, isHighwayExit) {
             road = leadExit[2].trim();
         }
     }
-    return { road, exitBadge };
+    if (road) {
+        road = extractInlineShields(road, shields);
+    }
+    return { road, exitBadge, shields };
 }
 
 function decodeEvent(e) {
@@ -122,6 +222,7 @@ function decodeEvent(e) {
             uk: d.uk,
             road: desc.road,
             exitBadge: desc.exitBadge,
+            shields: desc.shields,
             unreliable: b.unreliable === true,
             dtd: isFinite(dtd) && dtd >= 0 ? dtd : null,
         };
@@ -134,6 +235,7 @@ function decodeEvent(e) {
     base.passive = false;
     base.road = desc.road;
     base.exitBadge = desc.exitBadge;
+    base.shields = desc.shields;
     return base;
 }
 
@@ -186,6 +288,7 @@ function decodeNextIntersection(v) {
         uk: d.uk,
         road: desc.road,
         exitBadge: desc.exitBadge,
+        shields: desc.shields,
         unreliable: false,
         dtd: null,
     };
@@ -831,6 +934,7 @@ class NavTracker {
 
 module.exports = {
     NavTracker,
+    decodeDescription,
     decodeEvent,
     decodeEvents,
     decodeLanes,

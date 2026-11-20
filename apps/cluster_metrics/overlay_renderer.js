@@ -42,19 +42,20 @@ const DEFAULT_WAZE_STATUS = '/run/waze-on-cluster/status.json';
 
 // Shifted +16px down so there is generous breathing room under the main digital speed digits while clearing the traffic light sign (>=536)
 const BELOW_SPEED_BASE = { x: 392, y: 445, w: 214, h: 84 };
-// Snugly right of KOMBI4's single-letter 'D' (1400..1424; GEAR_WIN 1380..1426). Hidden in S/M where BMW renders S1..S8 natively.
-const GEAR_D_BASE = { x: 1432, y: 650, w: 28, h: 56 };
-// Stacked OEM 'CABIN' micro-header + HVAC-colored interior temperature between gear_d (1432..1460) and stock ambient (+57°F at 1540+)
-const CABIN_TEMP_BASE = { x: 1462, y: 654, w: 72, h: 50 };
+// Strictly x >= 1461 so we NEVER overlap KOMBI4's GEAR_WIN (1380..1460), which both clips digits
+// and latches BMW's safety BLACK_BOX over the Right Wing (1406..1597, 342..419).
+const GEAR_D_BASE = { x: 1461, y: 650, w: 26, h: 56 };
+// Compact stacked OEM 'CABIN' micro-header + HVAC-colored interior temp between gear_d (1461..1487) and stock ambient (+57°F at 1540+)
+const CABIN_TEMP_BASE = { x: 1488, y: 654, w: 51, h: 50 };
 const BRAKE_RAIL_BASE = { x: 1280, y: 609, w: 296, h: 31 };
 const CORNER_LEFT_BASE = { x: 8, y: 643, w: 116, h: 66 };
 // Bottom-right corner readout below battery icon (12V SoC % by default now that PHEV HV SoC overlays the HV battery gauge)
 const CORNER_RIGHT_BASE = { x: 1816, y: 646, w: 98, h: 66 };
 // PHEV-only HV Battery SoC % overlay centered inside the upper dark pocket of the bottom-right HV battery sub-gauge (well above the 50 mark)
 const HV_SOC_GAUGE_BASE = { x: 1796, y: 452, w: 92, h: 56 };
-// Right-Wing Gauge & Widget pocket (1252..1788, 88..604): full-wing gauge-edge artwork backdrop (no darkened border)
-// with foreground cover & text centered at world x=1438 (cover 1366..1510, y=184..328)
-const RIGHT_WIDGET_BASE = { x: 1252, y: 88, w: 536, h: 516 };
+// Right-Wing Gauge & Widget pocket (1252..1788, 88..624): full-wing calibrated gauge-face artwork backdrop
+// (including top-left eyebrow handle & full bottom-right CHARGE curve) with foreground cover & text at world x=1448
+const RIGHT_WIDGET_BASE = { x: 1252, y: 88, w: 536, h: 536 };
 
 // Strictly y=100..200 (<= 202 Assisted Driving / ACC set-speed & green car keep-out)
 const HUD_BASE = { x: 136, y: 100, w: 268, h: 100 };
@@ -649,9 +650,12 @@ class OverlayRenderer {
         const showHud = wantHud && !hudYieldedToNav;
         const showOwnHudNav = showHud && !wocHudOn && hudNavMode !== 'yield_route' && hudNavMode !== 'keep' &&
             Boolean(hn && hn.show);
-        // Full-width top-row street & highway exit badge banner when active maneuver has a street or exit number
-        const showHudRoad = Boolean(showOwnHudNav && hn && hn.show &&
-            ((hn.show.road && hn.show.road.length > 0) || (hn.show.exitBadge && hn.show.exitBadge.length > 0)));
+        // Full-width top-row street, highway shield & exit badge banner when active maneuver has any road/shield/exit
+        const showHudRoad = Boolean(showOwnHudNav && hn && hn.show && (
+            (hn.show.road && hn.show.road.length > 0) ||
+            (hn.show.exitBadge && hn.show.exitBadge.length > 0) ||
+            (Array.isArray(hn.show.shields) && hn.show.shields.length > 0)
+        ));
         const wocHudOverlay = Boolean(showHud && wocHudOn);
 
         const hx = clamp(Number(s.hudNudgeX) || 0, -40, 40);
@@ -779,17 +783,17 @@ class OverlayRenderer {
             this._setVisible('below_speed', true);
             this._upload('below_speed');
 
-            // 1b. Zone 2: Shift Position Snugly Next to Stock 'D' (1432..1460, 650..706; strictly x >= 1429 clear of GEAR_WIN 1426)
-            const gdRect = {
-                x: clamp(GEAR_D_BASE.x + cx, 1429, 1438),
-                y: clamp(GEAR_D_BASE.y + cy, 648, 654),
-                w: GEAR_D_BASE.w,
-                h: GEAR_D_BASE.h,
-            };
-            const lGd = this._ensureOrLocal('gear_d', Object.assign({ target: 'panel', visible: false, z: 14 }, gdRect));
+            // 1b. Zone 2: Shift Position Strictly Clear of KOMBI4 GEAR_WIN (1461..1487, 650..706; NEVER <= 1460)
             const showGearDigit = gearDisplay === 'next_to_d' && inNormalD;
             const alertObj = model.previewAlert || (s.smartAlerts !== false ? profile.alert : null);
             if (showGearDigit) {
+                const gdRect = {
+                    x: clamp(GEAR_D_BASE.x + cx, 1461, 1464),
+                    y: clamp(GEAR_D_BASE.y + cy, 648, 654),
+                    w: GEAR_D_BASE.w,
+                    h: GEAR_D_BASE.h,
+                };
+                const lGd = this._ensureOrLocal('gear_d', Object.assign({ target: 'panel', visible: true, z: 14 }, gdRect));
                 this._paintGearNextToD(lGd.cv, String(Math.round(t.gear)));
                 this._setVisible('gear_d', true);
                 this._upload('gear_d');
@@ -797,10 +801,10 @@ class OverlayRenderer {
                 this._setVisible('gear_d', false);
             }
 
-            // 1b2. Stacked 'CABIN' Interior Temperature Left of Ambient Temp (1462..1534, 654..704; HVAC-mode colored)
+            // 1b2. Stacked 'CABIN' Interior Temperature Left of Ambient Temp (1488..1539, 654..704; HVAC-mode colored)
             if (showCabinTemp) {
                 const ctRect = {
-                    x: clamp(CABIN_TEMP_BASE.x + cx, 1460, 1466),
+                    x: clamp(CABIN_TEMP_BASE.x + cx, 1487, 1489),
                     y: clamp(CABIN_TEMP_BASE.y + cy, 650, 658),
                     w: CABIN_TEMP_BASE.w,
                     h: CABIN_TEMP_BASE.h,
@@ -1117,12 +1121,12 @@ class OverlayRenderer {
     _paintGearNextToD(cv, digitStr) {
         cv.clear(COL.clear);
         if (digitStr) {
-            drawTextOutline(cv, digitStr, 2, 46, 40, COL.white, { font: 'bold', align: 'left' });
+            drawTextOutline(cv, digitStr, 1, 46, 38, COL.white, { font: 'bold', align: 'left' });
         }
     }
 
     /**
-     * Option A: Unboxed OEM two-row stacked interior cabin temperature (`74x50`),
+     * Option A: Unboxed OEM two-row stacked interior cabin temperature (`51x50` at 1488..1539),
      * matching `12V` and `SOC` micro-header hierarchy, with HVAC thermal color coding:
      *   - `'cooling'` (AC cooling) -> Blue (`#5bc8ff`)
      *   - `'heating'` (Heating/Defrost) -> Orange (`#ff9f43`)
@@ -1134,24 +1138,24 @@ class OverlayRenderer {
         const numPart = String(tf.value);
         const unitPart = tf.unit;
         const pal = cabinHvacPalette(hvacMode);
-        const cx = 38;
+        const cx = Math.round(cv.w / 2);
 
-        drawTextOutline(cv, 'CABIN', cx, 17, 12, '#9ab0c9', { font: 'bold', align: 'center' });
+        drawTextOutline(cv, 'CABIN', cx, 17, 11, '#9ab0c9', { font: 'bold', align: 'center' });
 
-        let numSz = 22;
-        let unitSz = 15;
+        let numSz = 20;
+        let unitSz = 14;
         let nw = cv.textWidth(numPart, numSz, { font: 'bold' });
         let uw = cv.textWidth(unitPart, unitSz, { font: 'bold' });
-        if (nw + uw + 2 > 64) {
-            numSz = 20;
-            unitSz = 14;
+        if (nw + uw + 1 > cv.w - 3) {
+            numSz = 18;
+            unitSz = 13;
             nw = cv.textWidth(numPart, numSz, { font: 'bold' });
             uw = cv.textWidth(unitPart, unitSz, { font: 'bold' });
         }
-        const total = nw + uw + 2;
-        const x0 = Math.max(2, Math.round(cx - total / 2));
+        const total = nw + uw + 1;
+        const x0 = Math.max(1, Math.round(cx - total / 2));
         drawTextOutline(cv, numPart, x0, 42, numSz, pal.val, { font: 'bold', align: 'left' });
-        drawTextOutline(cv, unitPart, x0 + nw + 2, 42, unitSz, pal.unit, { font: 'bold', align: 'left' });
+        drawTextOutline(cv, unitPart, x0 + nw + 1, 42, unitSz, pal.unit, { font: 'bold', align: 'left' });
     }
 
     /**

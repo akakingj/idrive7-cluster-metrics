@@ -28,15 +28,25 @@ Instead of replacing BMW's Live Cockpit with a completely different aftermarket 
 </p>
 
 <p align="center">
-  <img src="docs/images/hud-navigation.jpg" alt="Cluster Metrics windshield HUD with navigation and telemetry" width="100%" />
+  <img src="docs/images/hud-navigation.jpg" alt="Cluster Metrics windshield HUD with navigation, highway shields, headway, and telemetry" width="100%" />
   <br />
-  <em>Windshield HUD: full-width road name with green highway exit shield, non-shifting efficiency + gear + regen power + friction-brake readout, and turn-by-turn lane guidance.</em>
+  <em>Windshield HUD: full-width road banner with green exit badge &amp; vector highway shields (<code>I-280</code>, <code>US-101</code>, <code>CA-85</code>), lead-car headway badge, non-shifting efficiency + gear + regen power + friction-brake readout, and turn-by-turn lane guidance.</em>
 </p>
 
 <p align="center">
   <img src="docs/images/cluster-charging.jpg" alt="Cluster Metrics plugged-in charging view" width="100%" />
   <br />
   <em>Plugged-in charging view: live charging speed (<code>2.9 kW / 16A</code>) below the electric range, an automatic Charging Finish Time widget on the right wing, and exact HV battery <code>%</code> in the bottom-right corner.</em>
+</p>
+
+---
+
+## HUD Icon &amp; Readout Guide
+
+Every icon, highway shield, headway readout, and configurable metric that can appear in the windshield HUD overlay:
+
+<p align="center">
+  <img src="docs/images/hud-guide.jpg" alt="Annotated Cluster Metrics windshield HUD guide" width="100%" />
 </p>
 
 ---
@@ -56,9 +66,10 @@ Cycle between enabled right-wing widgets directly with your steering-wheel **BC*
 - **Charging Finish Time** *(automatic)*: Activates automatically whenever you plug in to charge, displaying estimated finish time, time remaining, charging speed, and target progress.
 
 ### Windshield HUD
-- **3-Line Customizable Telemetry**: Put your choice of efficiency, gear, live power, temperatures, or friction-brake bar on the glass — fixed in place so numbers never jitter, and kept clear of BMW's Speed Limit and Assisted Driving graphics.
-- **Full-Width Road & Highway Exit Banner**: Uses the full top width of the HUD for long street names along with green highway exit number shields.
-- **Turn-by-Turn & Lane Guidance**: Clean arrow and lane guidance that works alongside Waze/CarPlay HUD map projection or auto-yields to BMW's built-in intersection mini-map.
+- **3-Line Customizable Telemetry**: Put your choice of efficiency, gear, live power, temperatures, `SOC %`, `12V %`, or friction-brake bar / smart anomaly alerts on the glass — fixed in place so numbers never jitter, and kept clear of BMW's Speed Limit and Assisted Driving graphics.
+- **Lead-Car Headway Badge**: Shows time headway (`1.8s`), physical distance (`118 ft` / `36 m`), and closing/opening speed delta (`-6 mph`) directly above BMW's green ACC car with color-coded thresholds.
+- **Full-Width Road, Highway Shield & Exit Banner**: Uses the full top width of the HUD for long street names with green highway exit squares and auto-detected vector highway shields (Interstate `I-880`, US Route `US-101`, State Route `CA-85`, and EU motorway plates).
+- **Turn-by-Turn & Lane Guidance**: Clean arrow, `"then"` next-turn preview, and 6-lane guidance that works alongside Waze/CarPlay HUD map projection or auto-yields to BMW's built-in intersection mini-map.
 
 ### Native iDrive Settings App
 Configure everything right from the iDrive controller with a simple 3-tab menu (**General**, **Cluster**, **HUD**) plus a live **Diagnostics** screen — no manual config file editing required.
