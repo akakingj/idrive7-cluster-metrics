@@ -75,31 +75,97 @@ function wrapAscii(cv, s, size, w, opts, lines) {
     return out;
 }
 
-function drawLanes(cv, L, x, cy, w, col, dim, accent) {
+function scaleAlpha(rgba, a) {
+    const k = Math.max(0, Math.min(1, a));
+    return [rgba[0], rgba[1], rgba[2], Math.round((rgba[3] !== undefined ? rgba[3] : 255) * k)];
+}
+
+function drawHovDiamond(cv, cx, cy, s, col) {
+    const rx = Math.max(3, 5.2 * s);
+    const ry = Math.max(4, 7.6 * s);
+    const pts = [[cx, cy - ry], [cx + rx, cy], [cx, cy + ry], [cx - rx, cy], [cx, cy - ry]];
+    cv.polyline(pts, Math.max(1.4, 2.0 * s), col);
+}
+
+/**
+ * Flexible single-tier lane row renderer supporting both foreground primary rows,
+ * compact tucked upper rows (`isBack`), and continuous promotion animation interpolation.
+ */
+function drawLaneRow(cv, L, cx, cy, col, dim, accent, opts) {
     if (!L || !L.lanes || !L.lanes.length) return 0;
+    const o = opts || {};
     const win = laneWindow(L);
     const n = Math.min(win.lanes.length, LANES_MAX);
-    const k = (w / LANE_W) * LANE_K_SCALE;
-    const h = LANE_H;
+    const maxW = typeof o.maxW === 'number' ? o.maxW : (cv.w - 16);
+    const cellMaxW = typeof o.cellMaxW === 'number' ? o.cellMaxW : LANE_W;
+    const w = Math.min(cellMaxW, maxW / Math.max(1, n));
+    const h = typeof o.h === 'number' ? o.h : LANE_H;
+    const kScale = typeof o.kScale === 'number' ? o.kScale : LANE_K_SCALE;
+    const alpha = typeof o.alpha === 'number' ? o.alpha : 1;
+    if (alpha <= 0.02) return 0;
+
+    const totalW = n * w;
+    const x = Math.round(cx - totalW / 2);
     const y0 = cy - h / 2;
+    const k = Math.min(kScale, (w / LANE_W) * kScale);
+    const lineW = o.isBack ? 1.4 : Math.max(1.5, 2 * (h / LANE_H));
+
+    const cCol = scaleAlpha(col, alpha);
+    const cDim = scaleAlpha(dim, alpha * (o.isBack ? 0.82 : 1));
+    const ulAlpha = typeof o.underlineAlpha === 'number' ? o.underlineAlpha : (o.isBack ? 0 : 1);
+    const cAcc = scaleAlpha(accent || col, alpha * ulAlpha);
+
+    // Subtle top framing hairline on tucked upper tier (mirrors BMW's rear stacked lane card)
+    if (o.isBack) {
+        cv.fillRect(Math.round(x + 2), Math.round(y0 - 2), Math.max(4, Math.round(totalW - 4)), 1, scaleAlpha(dim, alpha * 0.45));
+    }
+
     for (let i = 0; i <= n; i++) {
         const mk = win.markers && win.markers[i];
         const lx = x + i * w;
-        if (mk === 'SOLID') cv.line(lx, y0, lx, y0 + h, 2, dim);
-        else {
-            for (let j = 0; j < 3; j++) cv.line(lx, y0 + j * h / 3 + 3, lx, y0 + j * h / 3 + h / 6 + 3, 2, dim);
+        if (mk === 'SOLID') {
+            cv.line(lx, y0, lx, y0 + h, lineW, cDim);
+        } else {
+            const segs = h < 34 ? 2 : 3;
+            for (let j = 0; j < segs; j++) {
+                const segTop = y0 + (j * h) / segs + 2;
+                const segBot = Math.min(y0 + h, segTop + h / (segs * 2));
+                cv.line(lx, segTop, lx, segBot, lineW, cDim);
+            }
         }
     }
+
     for (let i = 0; i < n; i++) {
         const ln = win.lanes[i];
-        drawLaneArrows(cv, ln, x + (i + 0.5) * w, cy, Math.min(LANE_K_SCALE, k), col, dim);
-        if (ln.hi && ln.info !== 'BLOCKED') {
-            cv.fillRect(Math.round(x + i * w + 4), Math.round(y0 + h + 3), Math.max(4, Math.round(w - 8)), 3, accent || col);
+        const lcx = x + (i + 0.5) * w;
+        const hasArrows = Boolean((ln.follows && ln.follows.length) || (ln.others && ln.others.length));
+        if (ln.info === 'HOV' && !hasArrows) {
+            drawHovDiamond(cv, lcx, cy, Math.max(0.75, k * 0.9), ln.hi ? cCol : cDim);
+        } else {
+            drawLaneArrows(cv, ln, lcx, cy, k, cCol, cDim);
+        }
+        if (ulAlpha > 0.05 && ln.hi && ln.info !== 'BLOCKED') {
+            cv.fillRect(Math.round(x + i * w + 4), Math.round(y0 + h + 3), Math.max(4, Math.round(w - 8)), 3, cAcc);
         }
     }
-    if (win.cutL) { cv.circle(x - 5, cy - 5, 2, dim); cv.circle(x - 5, cy + 5, 2, dim); }
-    if (win.cutR) { cv.circle(x + n * w + 5, cy - 5, 2, dim); cv.circle(x + n * w + 5, cy + 5, 2, dim); }
-    return n * w;
+
+    const dotR = o.isBack ? 1.5 : 2;
+    if (win.cutL) { cv.circle(x - 5, cy - 4, dotR, cDim); cv.circle(x - 5, cy + 4, dotR, cDim); }
+    if (win.cutR) { cv.circle(x + totalW + 5, cy - 4, dotR, cDim); cv.circle(x + totalW + 5, cy + 4, dotR, cDim); }
+    return totalW;
+}
+
+function drawLanes(cv, L, x, cy, w, col, dim, accent) {
+    if (!L || !L.lanes || !L.lanes.length) return 0;
+    const n = Math.min(laneWindow(L).lanes.length, LANES_MAX);
+    return drawLaneRow(cv, L, x + (n * w) / 2, cy, col, dim, accent, {
+        maxW: n * w,
+        cellMaxW: w,
+        h: LANE_H,
+        kScale: LANE_K_SCALE,
+        alpha: 1,
+        underlineAlpha: 1,
+    });
 }
 
 const DOPTS = { font: 'bold', literal: true };
@@ -362,22 +428,41 @@ function drawHudNav(cv, m, opts) {
 
     const botY = cv.h - 14;
     if (nL > 0) {
-        const laneCy = cv.h - 38;
-        const heroTop = hasInlineHeader ? 50 : 8;
-        const heroBot = laneCy - 30;
+        const nextRow = (m.lanes && m.lanes.next && m.lanes.next.lanes && m.lanes.next.lanes.length > 0) ? m.lanes.next : null;
+        const anim = (m.lanes && m.lanes.anim && typeof m.lanes.anim.t === 'number' && m.lanes.anim.t >= 0 && m.lanes.anim.t < 1)
+            ? m.lanes.anim : null;
+        const stackedLayout = Boolean(nextRow || anim);
+
+        const topLaneCy = 152;
+        const botLaneCy = stackedLayout ? (cv.h - 34) : (cv.h - 38);
+        const animSingleBlend = (anim && !nextRow)
+            ? (1 - Math.pow(1 - Math.max(0, Math.min(1, (anim.t - 0.15) / 0.85)), 3))
+            : 0;
+        const heroTop = hasInlineHeader ? 48 : 6;
+        const stackedHeroBot = topLaneCy - 18;
+        const singleHeroBot = (cv.h - 38) - 30;
+        const heroBot = stackedLayout
+            ? Math.round(stackedHeroBot + (singleHeroBot - stackedHeroBot) * animSingleBlend)
+            : singleHeroBot;
         const arrowCx = 62;
         const arrowCy = Math.round((heroTop + heroBot) / 2);
-        const arrowScale = hasInlineHeader ? 1.28 : 1.48;
+        const stackedScale = hasInlineHeader ? 1.06 : 1.22;
+        const singleScale = hasInlineHeader ? 1.28 : 1.48;
+        const arrowScale = stackedLayout
+            ? (stackedScale + (singleScale - stackedScale) * animSingleBlend)
+            : singleScale;
         drawArrow(cv, m, arrowCx, arrowCy, arrowScale, col, dim);
 
         const rx = 126;
         const rMax = cv.w - rx - 6;
         if (rawDist) {
-            let dSz = 48, uSz = 24;
+            let dSz = stackedLayout ? 44 : 48;
+            let uSz = stackedLayout ? 22 : 24;
             let uW = unit ? cv.textWidth(unit, uSz, UOPTS) : 0;
             let dW = cv.textWidth(rawDist, dSz, DOPTS);
             if (dW + (uW ? 6 + uW : 0) > rMax) {
-                dSz = 42; uSz = 22;
+                dSz = stackedLayout ? 38 : 42;
+                uSz = stackedLayout ? 20 : 22;
                 uW = unit ? cv.textWidth(unit, uSz, UOPTS) : 0;
                 dW = cv.textWidth(rawDist, dSz, DOPTS);
             }
@@ -387,27 +472,99 @@ function drawHudNav(cv, m, opts) {
                 const drawnW = textOutline(cv, rawDist, rx, dy, dSz, col, DOPTS);
                 if (unit) textOutline(cv, unit, rx + drawnW + 6, dy - 2, uSz, unitCol, UOPTS);
             } else {
-                const dFit = fitAscii(cv, rawDist, 42, rMax, DOPTS);
-                const dyTop = th ? (arrowCy - 18) : (arrowCy - 2);
-                textOutline(cv, dFit, rx, dyTop, 42, col, DOPTS);
-                if (unit) textOutline(cv, unit, rx, dyTop + 26, 22, unitCol, UOPTS);
+                const dFit = fitAscii(cv, rawDist, 40, rMax, DOPTS);
+                const dyTop = th ? (arrowCy - 16) : (arrowCy - 2);
+                textOutline(cv, dFit, rx, dyTop, 40, col, DOPTS);
+                if (unit) textOutline(cv, unit, rx, dyTop + 24, 21, unitCol, UOPTS);
             }
         }
 
         if (th) {
-            const ty = arrowCy + 40;
-            const thenW = textOutline(cv, 'then', rx, ty, 19, unitCol, ROPTS);
+            const ty = arrowCy + (stackedLayout ? 34 : 40);
+            const thenW = textOutline(cv, 'then', rx, ty, stackedLayout ? 18 : 19, unitCol, ROPTS);
             const ax = rx + thenW + 20;
-            drawArrow(cv, th, ax, ty - 7, 0.44, col, dim);
+            drawArrow(cv, th, ax, ty - 7, 0.42, col, dim);
             if (thGap) {
-                const gFit = fitAscii(cv, thGap, 19, Math.max(24, cv.w - (ax + 18) - 4), ROPTS);
-                if (gFit) textOutline(cv, gFit, ax + 18, ty, 19, col, ROPTS);
+                const gFit = fitAscii(cv, thGap, stackedLayout ? 18 : 19, Math.max(24, cv.w - (ax + 18) - 4), ROPTS);
+                if (gFit) textOutline(cv, gFit, ax + 18, ty, stackedLayout ? 18 : 19, col, ROPTS);
             }
         }
 
-        const lw = laneW(nL, cv.w - 16);
-        const lx = Math.round((cv.w - nL * lw) / 2);
-        drawLanes(cv, m.lanes, lx, laneCy, lw, col, dim, ACCENT_BLUE);
+        if (anim) {
+            const t = Math.max(0, Math.min(1, anim.t));
+            const slideT = Math.max(0, Math.min(1, (t - 0.15) / 0.85));
+            const ease = 1 - Math.pow(1 - slideT, 3); // smooth cubic ease-out after outgoing row clears
+
+            // 1. Outgoing lower lane row swiftly fades & drops away over first 30% so promoted row never collides
+            if (anim.droppedRow && t < 0.30) {
+                const dFrac = t / 0.30;
+                drawLaneRow(cv, anim.droppedRow, midX, botLaneCy + 16 * dFrac, col, dim, ACCENT_BLUE, {
+                    maxW: cv.w - 16,
+                    cellMaxW: 38,
+                    h: 44,
+                    kScale: 1.28,
+                    alpha: (1 - dFrac) * 0.90,
+                    underlineAlpha: (1 - dFrac),
+                });
+            }
+
+            // 2. If a brand-new upper tier is queued behind the promoted row, fade & tuck it in smoothly
+            if (nextRow && t > 0.44) {
+                const nFrac = Math.min(1, (t - 0.44) / 0.52);
+                drawLaneRow(cv, nextRow, midX, topLaneCy - 8 * (1 - nFrac), col, dim, ACCENT_BLUE, {
+                    maxW: 204,
+                    cellMaxW: 30,
+                    h: 28,
+                    kScale: 0.86,
+                    alpha: 0.74 * nFrac,
+                    isBack: true,
+                    underlineAlpha: 0,
+                });
+            }
+
+            // 3. Promoted lane row glides down and enlarges from upper tucked tier into primary foreground tier
+            const tgtCy = nextRow ? botLaneCy : (cv.h - 38);
+            const tgtH = nextRow ? 44 : LANE_H;
+            const tgtCellW = nextRow ? 38 : LANE_W;
+            const tgtK = nextRow ? 1.28 : LANE_K_SCALE;
+            drawLaneRow(cv, m.lanes, midX, topLaneCy + (tgtCy - topLaneCy) * ease, col, dim, ACCENT_BLUE, {
+                maxW: 204 + ((cv.w - 16) - 204) * ease,
+                cellMaxW: 30 + (tgtCellW - 30) * ease,
+                h: 28 + (tgtH - 28) * ease,
+                kScale: 0.86 + (tgtK - 0.86) * ease,
+                alpha: 0.74 + 0.26 * ease,
+                isBack: ease < 0.20,
+                underlineAlpha: Math.max(0, (ease - 0.20) / 0.80),
+            });
+        } else if (nextRow) {
+            // Two-level stacked BMW lane guidance: compact dimmer upper row tucked behind larger primary lower row
+            drawLaneRow(cv, nextRow, midX, topLaneCy, col, dim, ACCENT_BLUE, {
+                maxW: 204,
+                cellMaxW: 30,
+                h: 28,
+                kScale: 0.86,
+                alpha: 0.74,
+                isBack: true,
+                underlineAlpha: 0,
+            });
+            const botW = drawLaneRow(cv, m.lanes, midX, botLaneCy, col, dim, ACCENT_BLUE, {
+                maxW: cv.w - 16,
+                cellMaxW: 38,
+                h: 44,
+                kScale: 1.28,
+                alpha: 1,
+                underlineAlpha: 1,
+            });
+            // Subtle crisp horizon bar separating foreground primary tier from tucked upper tier
+            if (botW > 0) {
+                const sepW = Math.min(cv.w - 12, Math.round(botW + 6));
+                cv.fillRect(Math.round(midX - sepW / 2), Math.round(botLaneCy - 26), sepW, 2, [110, 148, 186, 130]);
+            }
+        } else {
+            const lw = laneW(nL, cv.w - 16);
+            const lx = Math.round((cv.w - nL * lw) / 2);
+            drawLanes(cv, m.lanes, lx, botLaneCy, lw, col, dim, ACCENT_BLUE);
+        }
     } else {
         const heroTop = hasInlineHeader ? 50 : 8;
         const heroBot = botY - 46;
@@ -456,11 +613,18 @@ function hudRoadKey(m) {
     return (m.exitBadge || '') + '|' + shieldsKey(m) + '|' + (m.road || '');
 }
 
+function laneKeyPart(row) {
+    if (!row || !Array.isArray(row.lanes) || !row.lanes.length) return '';
+    return row.lanes.map((l) => (l.hi ? '*' : '') + (l.follows || [l.follow]).join('+') + '/' + (l.others || []).join('+') + '/' + l.info).join(',') +
+        '|' + (row.markers || []).join(',') + '|' + row.rec;
+}
+
 function hudNavKey(m) {
     if (!m) return '';
     const L = m.lanes && m.lanes.lanes
-        ? m.lanes.lanes.map((l) => (l.hi ? '*' : '') + (l.follows || [l.follow]).join('+') + '/' + (l.others || []).join('+') + '/' + l.info).join(',') +
-            '|' + (m.lanes.markers || []).join(',') + '|' + m.lanes.rec
+        ? laneKeyPart(m.lanes) +
+            (m.lanes.next ? ('^' + laneKeyPart(m.lanes.next)) : '') +
+            (m.lanes.anim && typeof m.lanes.anim.t === 'number' ? ('@' + Math.round(m.lanes.anim.t * 20)) : '')
         : '';
     const T = m.then
         ? [m.then.kind, m.then.dir, m.then.geom, m.then.exit, m.then.exitAngle, m.then.side, m.then.flag, m.then.stop, gapText(m.then.gap, m.unit, m.uk)].join('/')

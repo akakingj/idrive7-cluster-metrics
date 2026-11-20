@@ -2192,6 +2192,98 @@ function inBox(x, y, box) {
         assert(alphaAt(1560, 610) > 20, 'backdrop must reach bottom-right gauge curve at (1560, 610)');
     });
 
+    /* 22. v0.8.6: Two-Level Stacked HUD Lane Guidance & Promotion Slide-Down Animation */
+    await test('v0.8.6: Two-level stacked HUD lane guidance (rows[0]+rows[1]), dtd ordering & promotion animation', () => {
+        const { NavTracker, decodeLanes } = require(path.join(APP_DIR, 'nav_tracker'));
+        const { drawHudNav, hudNavKey, NW, NH } = require(path.join(APP_DIR, 'hud_nav_renderer'));
+        const { Canvas } = require('./kit/canvas');
+
+        const rowImmediate = {
+            uid: '10',
+            distanceToDestination: 5200,
+            lanes: [
+                { directionToFollow: 'NONE', otherDirections: [], isHighlighted: false, additionalLaneInfo: 'HOV' },
+                { directionToFollow: 'STRAIGHT_ON', otherDirections: [], isHighlighted: true, additionalLaneInfo: 'NONE' },
+                { directionToFollow: 'STRAIGHT_ON', otherDirections: [], isHighlighted: true, additionalLaneInfo: 'NONE' },
+                { directionToFollow: 'STRAIGHT_ON', otherDirections: ['RIGHT'], isHighlighted: true, additionalLaneInfo: 'NONE' },
+            ],
+            laneMarkers: ['SOLID', 'SOLID', 'DASHED', 'DASHED', 'SOLID'],
+            recommendedCarPositionLaneIndex: 2,
+        };
+        const rowUpcoming = {
+            uid: '11',
+            distanceToDestination: 4700,
+            lanes: [
+                { directionToFollow: 'NONE', otherDirections: ['STRAIGHT_ON'], isHighlighted: false, additionalLaneInfo: 'NONE' },
+                { directionToFollow: 'NONE', otherDirections: ['STRAIGHT_ON'], isHighlighted: false, additionalLaneInfo: 'NONE' },
+                { directionToFollow: 'SLIGHT_RIGHT', otherDirections: [], isHighlighted: true, additionalLaneInfo: 'NONE' },
+                { directionToFollow: 'RIGHT', otherDirections: [], isHighlighted: true, additionalLaneInfo: 'NONE' },
+            ],
+            laneMarkers: ['SOLID', 'DASHED', 'DASHED', 'DASHED', 'SOLID'],
+            recommendedCarPositionLaneIndex: 3,
+        };
+
+        // A. Multi-row decoding self-orders by distanceToDestination (larger dtd = immediate lower row)
+        const decReversed = decodeLanes({ rows: [rowUpcoming, rowImmediate] });
+        assert(decReversed && decReversed.uid === '10' && decReversed.next && decReversed.next.uid === '11',
+            'decodeLanes must place larger dtd row in primary lower slot and smaller dtd row in upper next slot');
+
+        // B. NavTracker tracks 2 stacked rows and fires promotion animation when upper row promotes into lower row
+        const nt = new NavTracker({ crStatusPath: '/nonexistent/cr', wazeStatusPath: '/nonexistent/woc' });
+        nt.feedField('guidance', 'guidanceState', 'ACTIVE', 1000);
+        nt.feedField('guidance', 'conclusiveDart', {
+            maneuver: {
+                branch: {
+                    branchType: 'HIGHWAY_OUT_RIGHT',
+                    formattedDistance: { distance: '0.4', unit: 'MILE_US' },
+                    description: { elements: [{ text: 'Exit 399A US-101 N Bayshore Fwy' }] },
+                },
+            },
+        }, 1050);
+        nt.feedField('guidance', 'currentLaneGuiding', { rows: [rowImmediate, rowUpcoming] }, 1100);
+        const snapStacked = nt.snapshot(20000, 1150);
+        assert.strictEqual(snapStacked.hasStackedLanes, true);
+        assert.strictEqual(snapStacked.laneAnimating, false);
+        assert(snapStacked.summary.indexOf('[4+4 lanes]') >= 0, 'summary should note stacked lane counts, got ' + snapStacked.summary);
+
+        // Drive past first split: rowImmediate disappears, rowUpcoming promotes to rows[0]!
+        nt.feedField('guidance', 'currentLaneGuiding', { rows: [rowUpcoming] }, 2000);
+        const snapAnimMid = nt.snapshot(20200, 2210);
+        assert.strictEqual(snapAnimMid.laneAnimating, true, 'promotion must trigger laneAnimating=true');
+        assert(snapAnimMid.show.lanes.anim && snapAnimMid.show.lanes.anim.t > 0.4 && snapAnimMid.show.lanes.anim.t < 0.6);
+        assert(snapAnimMid.show.lanes.anim.droppedRow && snapAnimMid.show.lanes.anim.droppedRow.lanes.length === 4);
+
+        // After 420 ms, promotion animation finishes cleanly
+        const snapAnimDone = nt.snapshot(20600, 2500);
+        assert.strictEqual(snapAnimDone.laneAnimating, false, 'promotion animation must finish cleanly after 420ms');
+        assert.strictEqual(snapAnimDone.hasStackedLanes, false);
+
+        // C. Stacked renderer paints both upper tucked tier (y=137..167) and lower primary tier (y=175..225)
+        const cvStacked = new Canvas(NW, NH);
+        drawHudNav(cvStacked, snapStacked.show, { hideRoad: true });
+        let upperLit = 0, lowerLit = 0;
+        for (let py = 136; py <= 167; py++) {
+            for (let px = 20; px < NW - 20; px++) {
+                if (cvStacked.d[(py * NW + px) * 4 + 3] > 80) upperLit++;
+            }
+        }
+        for (let py = 175; py <= 226; py++) {
+            for (let px = 20; px < NW - 20; px++) {
+                if (cvStacked.d[(py * NW + px) * 4 + 3] > 140) lowerLit++;
+            }
+        }
+        assert(upperLit > 80, 'upper tucked lane row must render visible pixels (got ' + upperLit + ')');
+        assert(lowerLit > 200, 'lower primary lane row must render visible pixels (got ' + lowerLit + ')');
+
+        // D. Animation frames produce distinct hudNavKey values & render cleanly
+        const kMid = hudNavKey(snapAnimMid.show);
+        const kDone = hudNavKey(snapAnimDone.show);
+        assert.notStrictEqual(kMid, kDone, 'mid-animation and steady-state must produce distinct hudNavKey');
+        const cvAnim = new Canvas(NW, NH);
+        drawHudNav(cvAnim, snapAnimMid.show, { hideRoad: true });
+        assert(cvAnim.d.some((v, idx) => idx % 4 === 3 && v > 120), 'mid-animation frame must render visible pixels');
+    });
+
     console.log('\nAll ' + passed + ' tests passed.');
     process.exit(0);
 })().catch((err) => {

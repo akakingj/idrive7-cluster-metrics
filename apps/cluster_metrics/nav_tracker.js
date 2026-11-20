@@ -17,7 +17,6 @@
 const fs = require('fs');
 const {
     decodeEvent: baseDecodeEvent,
-    decodeLanes,
     metres,
     straightOn,
     staleThen,
@@ -35,6 +34,7 @@ const CALL_BACKOFF_MS = 2000;
 const FAILS_RECONNECT = 5;
 const LANES_MINIMAP_MAX_MS = 18000;
 const NO_TURN_FALLBACK_MS = 5000;
+const LANE_PROMO_MS = 420;
 
 const DEFAULT_CR_STATUS = '/run/cluster-render/status.txt';
 const DEFAULT_WAZE_STATUS = '/run/waze-on-cluster/status.json';
@@ -294,6 +294,84 @@ function decodeNextIntersection(v) {
     };
 }
 
+function decodeLaneRow(row) {
+    if (!isObj(row) || !Array.isArray(row.lanes) || !row.lanes.length) return null;
+    const list = (a) => (Array.isArray(a) ? a : []).map((x) => enumOf('TurnDirection', x)).filter((s) => s && s !== 'NONE');
+    const lanes = row.lanes.slice(0, 16).map((l) => {
+        const lane = isObj(l) ? l : {};
+        let follows = list(lane.directionsToFollow);
+        const one = enumOf('TurnDirection', lane.directionToFollow) || 'NONE';
+        if (one !== 'NONE' && follows.indexOf(one) < 0) follows = [one].concat(follows);
+        const others = list(lane.otherDirections).filter((s) => follows.indexOf(s) < 0);
+        const rawHi = lane.isHighlighted !== undefined ? lane.isHighlighted : lane.highlight;
+        const hi = rawHi === true || Boolean(follows.length && rawHi !== false && rawHi !== 0);
+        return {
+            follow: follows[0] || 'NONE',
+            follows,
+            others,
+            hi,
+            info: enumOf('AdditionalLaneInfo', lane.additionalLaneInfo) || 'NONE',
+        };
+    });
+    const rawRec = row.recommendedCarPositionLaneIndex !== undefined ? row.recommendedCarPositionLaneIndex : row.recommendedLaneIndex;
+    const rec = Number(rawRec);
+    const dtd = Number(row.distanceToDestination);
+    const len = Number(row.length);
+    const uid = (row.uid !== undefined && row.uid !== null && String(row.uid) !== '') ? String(row.uid) : null;
+    return {
+        uid,
+        lanes,
+        rec: isFinite(rec) && rec >= 0 && rec < lanes.length ? rec : null,
+        markers: Array.isArray(row.laneMarkers) ? row.laneMarkers.map((x) => enumOf('LaneMarker', x)) : [],
+        dtd: isFinite(dtd) && dtd >= 0 ? dtd : null,
+        len: isFinite(len) && len >= 0 ? len : null,
+    };
+}
+
+function laneRowSig(row) {
+    if (!row || !Array.isArray(row.lanes)) return '';
+    return row.lanes.map((l) => (l.hi ? '*' : '') + (l.follows || [l.follow]).join('+') + '/' + (l.others || []).join('+') + '/' + l.info).join(',');
+}
+
+function isSameLaneRow(a, b, ignoreUid) {
+    if (!a || !b) return false;
+    if (!ignoreUid && a.uid !== null && b.uid !== null && a.uid === b.uid) return true;
+    const sa = laneRowSig(a);
+    return Boolean(sa && sa === laneRowSig(b));
+}
+
+/**
+ * Multi-row currentLaneGuiding decoder:
+ *   - Supports both single-row (CarPlay/standard) and BMW's 2-level stacked lane guidance (`rows[0]` immediate
+ *     lower row + `rows[1]` upcoming upper tucked row).
+ *   - Self-orders by `distanceToDestination` when both rows report distinct valid `dtd` (larger dtd = nearer to car).
+ */
+function decodeLanes(v) {
+    if (!isObj(v) || !Array.isArray(v.rows) || !v.rows.length) return null;
+    const rows = [];
+    for (let i = 0; i < v.rows.length && rows.length < 2; i++) {
+        const dec = decodeLaneRow(v.rows[i]);
+        if (dec) rows.push(dec);
+    }
+    if (!rows.length) return null;
+    let primary = rows[0];
+    let nextRow = rows.length >= 2 ? rows[1] : null;
+    if (nextRow && typeof primary.dtd === 'number' && typeof nextRow.dtd === 'number' && nextRow.dtd > primary.dtd) {
+        const tmp = primary;
+        primary = nextRow;
+        nextRow = tmp;
+    }
+    return {
+        uid: primary.uid,
+        lanes: primary.lanes,
+        rec: primary.rec,
+        markers: primary.markers,
+        dtd: primary.dtd,
+        len: primary.len,
+        next: nextRow,
+    };
+}
+
 function decodeDart(v) {
     return isObj(v) && isObj(v.maneuver) ? decodeEvent(v.maneuver) : null;
 }
@@ -390,6 +468,7 @@ class NavTracker {
         this.nextIntAt = -Infinity;
         this.lanes = null;
         this.lanesAt = -Infinity;
+        this.lanePromo = null;
         this.turnKey = '';
         this.lanesSeenForTurn = false;
         this.lanesSwitchedToMiniMap = false;
@@ -464,6 +543,7 @@ class NavTracker {
             this.nextInt = null;
         }
         this.lanes = null;
+        this.lanePromo = null;
         this.turnKey = '';
         this.lanesSeenForTurn = false;
         this.lanesSwitchedToMiniMap = false;
@@ -580,6 +660,23 @@ class NavTracker {
             }
             const decoded = decodeLanes(v);
             if (decoded) {
+                const prev = this.lanes;
+                if (prev && prev.next) {
+                    const genericUid = prev.uid !== null && prev.next.uid !== null && prev.uid === prev.next.uid;
+                    const sameAsOldPrimary = isSameLaneRow(prev, decoded, genericUid);
+                    const promotedFromUpper = isSameLaneRow(prev.next, decoded, genericUid);
+                    if (promotedFromUpper && !sameAsOldPrimary) {
+                        this.lanePromo = {
+                            startMono: now,
+                            durationMs: LANE_PROMO_MS,
+                            droppedRow: {
+                                lanes: prev.lanes,
+                                rec: prev.rec,
+                                markers: prev.markers,
+                            },
+                        };
+                    }
+                }
                 this.lanes = decoded;
                 this.lanesAt = now;
                 if (this.turnKey !== '') this.lanesSeenForTurn = true;
@@ -596,6 +693,7 @@ class NavTracker {
                     }
                 }
                 this.lanes = null;
+                this.lanePromo = null;
                 this.lanesAt = now;
             }
         } else if (name === 'nextIntersection') {
@@ -651,7 +749,21 @@ class NavTracker {
                 : (renOk ? this.renderedTurn
                     : (niOk ? this.nextInt : null)));
         if (!m) return null;
-        return Object.assign({}, m, { lanes: this.lanes });
+        let lanesOut = this.lanes;
+        if (lanesOut && this.lanePromo) {
+            const elapsed = now - this.lanePromo.startMono;
+            if (elapsed >= 0 && elapsed < this.lanePromo.durationMs) {
+                lanesOut = Object.assign({}, lanesOut, {
+                    anim: {
+                        t: elapsed / this.lanePromo.durationMs,
+                        droppedRow: this.lanePromo.droppedRow,
+                    },
+                });
+            } else if (elapsed >= this.lanePromo.durationMs) {
+                this.lanePromo = null;
+            }
+        }
+        return Object.assign({}, m, { lanes: lanesOut });
     }
 
     _pollStatusFiles(nowWallMs) {
@@ -687,6 +799,8 @@ class NavTracker {
             this.lanesMiniMapSince = 0;
         }
         const hasLanes = Boolean(show && show.lanes && show.lanes.lanes && show.lanes.lanes.length > 0);
+        const hasStackedLanes = Boolean(hasLanes && show.lanes.next && show.lanes.next.lanes && show.lanes.next.lanes.length > 0);
+        const laneAnimating = Boolean(hasLanes && show.lanes.anim && show.lanes.anim.t >= 0 && show.lanes.anim.t < 1);
         const guide = routeActive ? this.guideSource() : 'NONE';
 
         let miniMapActive = false;
@@ -713,9 +827,11 @@ class NavTracker {
             summary = 'Waze HUD map (overlaying metrics)';
         } else if (routeActive) {
             if (show) {
+                const laneTag = hasStackedLanes
+                    ? (' [' + show.lanes.lanes.length + '+' + show.lanes.next.lanes.length + ' lanes]')
+                    : (hasLanes ? ' [' + show.lanes.lanes.length + ' lanes]' : '');
                 summary = guide + ': ' + show.kind + ' ' + (show.dir || (show.exit ? 'exit ' + show.exit : '')) +
-                    (show.dist ? ' ' + show.dist + (show.unit || '') : '') +
-                    (hasLanes ? ' [' + show.lanes.lanes.length + ' lanes]' : '');
+                    (show.dist ? ' ' + show.dist + (show.unit || '') : '') + laneTag;
             } else {
                 summary = guide + ': route active (' + (this.lastErr ? ('err: ' + this.lastErr) : 'waiting for turn') + ')';
             }
@@ -728,6 +844,8 @@ class NavTracker {
             guide,
             show,
             hasLanes,
+            hasStackedLanes,
+            laneAnimating,
             miniMapActive,
             miniMapReason,
             noTurnFallback,

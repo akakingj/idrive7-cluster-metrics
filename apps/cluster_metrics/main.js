@@ -114,6 +114,8 @@ function createBackgroundRuntime(bg) {
             const now = typeof nowMs === 'number' ? nowMs : Date.now();
             const model = state.computeModel(now);
             renderer.render(model, settings.values, now);
+            const animating = Boolean(model.telemetry && model.telemetry.hudNav && model.telemetry.hudNav.laneAnimating);
+            syncLaneAnimTimer(animating);
             if (typeof state.onUiTick === 'function') {
                 state.onUiTick(model, now, Boolean(forceUi));
             }
@@ -121,10 +123,24 @@ function createBackgroundRuntime(bg) {
         },
         cleanup() {
             clearInterval(timer);
+            syncLaneAnimTimer(false);
             hub.stop();
             renderer.close();
         },
     };
+
+    let laneAnimTimer = null;
+    function syncLaneAnimTimer(active) {
+        if (active && !laneAnimTimer) {
+            laneAnimTimer = setInterval(() => {
+                try { state.tick(Date.now(), false); } catch (e) { log.warn('anim tick: ' + (e.message || e)); }
+            }, 50);
+            if (laneAnimTimer && typeof laneAnimTimer.unref === 'function') laneAnimTimer.unref();
+        } else if (!active && laneAnimTimer) {
+            clearInterval(laneAnimTimer);
+            laneAnimTimer = null;
+        }
+    }
 
     hub.start();
     renderer.connect();
