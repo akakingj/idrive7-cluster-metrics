@@ -1531,7 +1531,7 @@ function inBox(x, y, box) {
         const r = new OverlayRenderer({ allowPanel: true });
         const model = {
             units: unitsMod.US_PRESET,
-            profile: { vehicleType: 'phev', engineOn: false, mode: 'ev_drive', isEv: true, isCold: false, coldCeilingRpm: null, alert: { id: 'tpms', severity: 'amber', label: 'FL 25psi' } },
+            profile: { vehicleType: 'phev', engineOn: false, mode: 'ev_drive', isEv: true, isCold: false, coldCeilingRpm: null, alert: null },
             efficiency: { evKmPerKwh: 6.1, fuelLPer100km: null, isDfco: false },
             telemetry: { speedKmh: 60, rpm: 0, hvKw: 12.4, soc: 76, erangeKm: 28, frangeKm: 310, tripDistKm: 19.4, gearboxOilC: 84, battTempC: 25, v12: 14.1, stage: 'D', program: 'D', gear: 5, frictionG: 0.24, brakeBar: 20, media: mSnap },
         };
@@ -1574,12 +1574,12 @@ function inBox(x, y, box) {
         assert.strictEqual(r.lastSummary.rightWidgetPage, 'trip');
         assert.strictEqual(r.layers.right_widget.visible, true);
 
-        // Cycle 2: Left-stalk momentary button pulse (operationColumnStalks 0 -> 4 -> 0) -> flips 'trip' -> 'off'
+        // Cycle 2: Left-stalk momentary button pulse (operationColumnStalks 0 -> 4 -> 0) -> flips 'trip' -> 'off' (when widgetTpms not enabled)
         mt.feedStalk({ operationColumnStalks: 0 }, 13000); // baseline rest
         mt.feedStalk({ operationColumnStalks: 4 }, 13100); // press
         assert.strictEqual(mt.feedStalk({ operationColumnStalks: 0 }, 13220), true); // release
         mSnap = mt.snapshot(13220, false);
-        assert.strictEqual(mSnap.page, 'off');
+        assert.strictEqual(mSnap.page, 'tpms');
         model.telemetry.media = mSnap;
         r.render(model, { enabled: true, rightWidgetMode: 'cycle' }, 13220);
         assert.strictEqual(r.lastSummary.rightWidgetPage, 'off');
@@ -1592,10 +1592,12 @@ function inBox(x, y, box) {
         mt.feedStalk({ operationColumnStalks: 0, statusPushButtonMainBeamAssistant: 'KEINE_BETAETIGUNG' }, 14280);
         await new Promise((res) => setTimeout(res, 700));
         mSnap = mt.snapshot(15100, false);
-        assert.strictEqual(mSnap.page, 'off', 'double-tap HBA button fallback must be removed');
+        assert.strictEqual(mSnap.bcStep, 2, 'double-tap HBA button fallback must be removed');
         assert.strictEqual(mt.feedKombiSelection({ statusActivationInstrumentPackContent: 3, statusActivationInstrumentPackBC: 12 }, 15150), true);
         mSnap = mt.snapshot(15150, false);
-        assert.strictEqual(mSnap.page, 'media', '3rd genuine BC click must cycle right_widget back to media');
+        model.telemetry.media = mSnap;
+        r.render(model, { enabled: true, rightWidgetMode: 'cycle' }, 15150);
+        assert.strictEqual(r.lastSummary.rightWidgetPage, 'media', '3rd genuine BC click must cycle right_widget back to media');
 
         // Fallback rendering when audio source has no cover art or is inactive
         model.telemetry.media = { active: true, title: 'FM 88.5 KQED', artist: 'Live Radio', cover: null, playing: true, page: 'media', bcStep: 0 };
@@ -2160,10 +2162,15 @@ function inBox(x, y, box) {
         r.render(model, opts, 1800);
         assert.strictEqual(r.lastSummary.rightWidgetPage, 'charging', '4th BC click must cycle back to charging');
 
-        // D. Smart alert preview renders on brake_rail & HUD even while parked/charging
-        model.previewAlert = { id: 'tpms', severity: 'red', label: 'FL 21psi' };
+        // D. Smart alert preview auto-switches right_widget to 'tpms' & HUD (and NEVER draws tiny text on brake_rail)
+        model.previewAlert = {
+            id: 'tpms', severity: 'red', corner: 'FL', seq: 1,
+            label: 'FL 21psi', hudText: 'Tire Pressure Critical', title: 'TIRE FLAT - CRITICAL',
+            detail: 'Front Left: 21 psi (Target 35 psi)',
+        };
         r.render(model, opts, 2000);
-        assert.strictEqual(r.layers.brake_rail.visible, true, 'previewAlert must illuminate brake_rail even in Park');
+        assert.strictEqual(r.lastSummary.rightWidgetPage, 'tpms', 'previewAlert must auto-switch right_widget to tpms alert view');
+        assert.strictEqual(r.layers.brake_rail.visible, false, 'brake_rail must stay hidden in Park without tiny alert text');
     });
 
     /* 21. v0.8.5: Highway Shields (US-101, I-880, CA-85) in HUD Nav + Calibrated Right-Wing Gauge Backdrop */
@@ -2324,6 +2331,168 @@ function inBox(x, y, box) {
         const cvAnim = new Canvas(NW, NH);
         drawHudNav(cvAnim, snapAnimMid.show, { hideRoad: true });
         assert(cvAnim.d.some((v, idx) => idx % 4 === 3 && v > 120), 'mid-animation frame must render visible pixels');
+    });
+
+    /* 23. Timezone UTC-1.5 Fix (KombiIF/AutoTime/HMIContext), Right-Wing TPMS+Alert Auto-Switch & BC Dismiss, and Stock BMW TTF */
+    await test('Timezone UTC-1.5 fix (17:36 PST + 2h 3m = 19:39), Right-Wing TPMS/Alert widget + BC HUD dismiss & BMW TTF rasterizer', () => {
+        const {
+            calcAutoTimeOffsetMin, calcKombiShowTimeOffsetMin, parseHmiTimeZoneOffsetMin, computeChargingState,
+        } = require(path.join(APP_DIR, 'signals'));
+        const { detectAnomaly } = require(path.join(APP_DIR, 'vehicle_profile'));
+        const { parseTtf, bakeSizeAtlas } = require(path.join(APP_DIR, 'bmw_font'));
+
+        // A. Exact reproduction & fix of user's 17:36 PST (01:36 UTC) + 2h 03m remaining bug:
+        //    - Uninitialized AutoTime.current { year: 0, month: 0, day: 0, hour: 0, minute: 0 } MUST return null (NEVER -90 / UTC-1.5!)
+        const utc0136 = Date.UTC(2026, 10, 22, 1, 36, 10); // Nov 21, 2026 17:36:10 PST = Nov 22, 2026 01:36:10 UTC
+        assert.strictEqual(
+            calcAutoTimeOffsetMin({ time: { hour: 0, minute: 0, second: 0 }, date: { year: 0, month: 0, day: 0 } }, utc0136),
+            null,
+            'uninitialized zero AutoTime.current struct must NEVER produce UTC-1.5 (-90 min)'
+        );
+        assert.strictEqual(
+            calcKombiShowTimeOffsetMin({ displayHour: 255, displayMinute: 255, displayDateYear: 65535, statusDisplayClockTimeDate: 15 }, utc0136),
+            null,
+            'uninitialized 0xFF KombiIF.statusShowTimeDate struct must return null'
+        );
+
+        // Valid KombiIF.statusShowTimeDate (17:36 on 2026-11-21) -> -480 min (UTC-8)
+        assert.strictEqual(
+            calcKombiShowTimeOffsetMin({
+                displayDateYear: 2026, displayDateMonth: 11, displayDateDay: 21,
+                displayHour: 17, displayMinute: 36, displaySecond: 10, statusDisplayClockTimeDate: 1,
+            }, utc0136),
+            -480
+        );
+        // Valid AutoTime.current (17:36 on 2026-11-21) -> -480 min (UTC-8)
+        assert.strictEqual(
+            calcAutoTimeOffsetMin({
+                date: { year: 2026, month: 11, day: 21 },
+                time: { hour: 17, minute: 36, second: 10 },
+            }, utc0136),
+            -480
+        );
+        // Valid HMIContext.currentTimeZone (string & numeric enum)
+        assert.strictEqual(parseHmiTimeZoneOffsetMin('UTC_MINUS_0800_1'), -480);
+        assert.strictEqual(parseHmiTimeZoneOffsetMin(4), -480);
+        assert.strictEqual(parseHmiTimeZoneOffsetMin('UTC_PLUS_0530'), 330);
+        assert.strictEqual(parseHmiTimeZoneOffsetMin(64), 330);
+        assert.strictEqual(parseHmiTimeZoneOffsetMin('UNKNOWN'), null);
+        assert.strictEqual(parseHmiTimeZoneOffsetMin(0), null);
+
+        // Verify 17:36 PST + 123 min (2h 3m) = 19:39!
+        const chg1736 = computeChargingState(
+            { wirePlugged: true, plugLocked: true, lscStatus: 'active', residualMin: 123, targetSoc: 100 },
+            { speedKmh: 0, rpm: 0, hvKw: -3.5, soc: 44, stage: 'P', localOffsetMin: -480 },
+            utc0136
+        );
+        assert.strictEqual(chg1736.remainText, '2h 3m');
+        assert.strictEqual(chg1736.finishTimeText, '19:39', '17:36 PST + 2h 3m must equal 19:39');
+
+        // B. Readable HUD alert strings & detailed Right-Wing TPMS / Alert auto-switch + BC dismissal
+        const aState = { _v12LowSince: 0, _soc12LowSince: 0 };
+        const aTpms = detectAnomaly({
+            tpms: { FL: { pressureBar: 2.05, targetBar: 2.41, tempC: 24 }, FR: { pressureBar: 2.41, targetBar: 2.41, tempC: 24 } },
+        }, unitsMod.US_PRESET, aState, 1000);
+        assert.strictEqual(aTpms.hudText, 'Tire Pressure Low');
+        assert.strictEqual(aTpms.title, 'TIRE PRESSURE LOW');
+        assert(aTpms.detail.indexOf('Front Left') >= 0 && aTpms.detail.indexOf('Target 35 psi') >= 0);
+
+        const aGbx = detectAnomaly({ gearboxOilC: 118 }, unitsMod.US_PRESET, aState, 1000);
+        assert.strictEqual(aGbx.hudText, 'Gearbox Critical');
+        assert.strictEqual(aGbx.severity, 'red');
+
+        detectAnomaly({ v12: 11.5 }, unitsMod.US_PRESET, aState, 1000);
+        const aV12 = detectAnomaly({ v12: 11.5 }, unitsMod.US_PRESET, aState, 6500);
+        assert.strictEqual(aV12.hudText, '12V Battery Critical');
+
+        // Verify normal 4-wheel TPMS widget + alert auto-switch + BC dismiss (even when bcStep starts at 1!)
+        const r = new OverlayRenderer({ allowPanel: true });
+        const settingsObj = { enabled: true, widgetMedia: true, widgetTrip: true, widgetTpms: true };
+        const m = {
+            units: unitsMod.US_PRESET,
+            profile: { vehicleType: 'phev', engineOn: false, mode: 'ev_drive', isEv: true, isCold: false, coldCeilingRpm: null, alert: null },
+            efficiency: { evKmPerKwh: 6.2, fuelLPer100km: null, isDfco: false },
+            telemetry: {
+                speedKmh: 72, rpm: 0, hvKw: 12.0, soc: 74, stage: 'D', program: 'D', gear: 5, frictionG: 0,
+                oilTempC: 90, coolantTempC: 88, v12: 14.1, soc12: 88,
+                tpms: {
+                    FL: { pressureBar: 2.41, targetBar: 2.41, tempC: 26 },
+                    FR: { pressureBar: 2.41, targetBar: 2.41, tempC: 27 },
+                    RL: { pressureBar: 2.62, targetBar: 2.62, tempC: 25 },
+                    RR: { pressureBar: 2.62, targetBar: 2.62, tempC: 26 },
+                },
+                media: { active: true, playing: true, title: 'The Daily', artist: 'NYT', bcStep: 2 },
+            },
+        };
+        // Step 2 in ['media', 'trip', 'tpms', 'off'] -> normal 4-wheel 'tpms' view!
+        r.render(m, settingsObj, 3000);
+        assert.strictEqual(r.lastSummary.rightWidgetPage, 'tpms');
+        let belowSafe = 0;
+        for (let y = 428; y < r.layers.right_widget.cv.h; y++) {
+            for (let x = 0; x < r.layers.right_widget.cv.w; x++) {
+                if (r.layers.right_widget.cv.d[(y * r.layers.right_widget.cv.w + x) * 4 + 3] > 0) belowSafe++;
+            }
+        }
+        assert.strictEqual(belowSafe, 0, 'normal 4-wheel TPMS widget must keep ry >= 428 clear');
+
+        // Driver is on 'trip' (bcStep = 1), then TPMS Low Alert fires -> auto-switches to 'tpms' + shows HUD alert!
+        m.telemetry.media.bcStep = 1;
+        r.render(m, settingsObj, 3200);
+        assert.strictEqual(r.lastSummary.rightWidgetPage, 'trip');
+
+        m.profile.alert = aTpms;
+        r.render(m, settingsObj, 3400);
+        assert.strictEqual(r.lastSummary.rightWidgetPage, 'tpms', 'alert must auto-switch right_widget to tpms alert view');
+        assert(r.lastSummary.activeAlert && r.lastSummary.activeAlert.hudText === 'Tire Pressure Low');
+        let hudRow3Lit = 0;
+        for (let y = 74; y < 99; y++) {
+            for (let x = 4; x < 240; x++) {
+                if (r.layers.hud_main.cv.d[(y * r.layers.hud_main.cv.w + x) * 4 + 3] > 180) hudRow3Lit++;
+            }
+        }
+        assert(hudRow3Lit > 120, 'HUD Row 3 must render readable "Tire Pressure Low" message');
+
+        // Driver presses BC once (bcStep 1 -> 2): HUD alert MUST dismiss AND right_widget MUST switch to 'media' (NOT stay on 'tpms'!)
+        m.telemetry.media.bcStep = 2;
+        r.render(m, settingsObj, 3600);
+        assert.strictEqual(r.lastSummary.alertDismissed, true, 'BC press must dismiss active alert');
+        assert.strictEqual(r.lastSummary.activeAlert, null, 'HUD activeAlert must clear on BC press');
+        assert.strictEqual(r.lastSummary.rightWidgetPage, 'media', 'BC dismiss must switch right_widget away from tpms to media');
+        let hudRow3AfterDismiss = 0;
+        for (let y = 74; y < 99; y++) {
+            for (let x = 4; x < 240; x++) {
+                if (r.layers.hud_main.cv.d[(y * r.layers.hud_main.cv.w + x) * 4 + 3] > 180) hudRow3AfterDismiss++;
+            }
+        }
+        assert.strictEqual(hudRow3AfterDismiss, 0, 'HUD Row 3 alert text must clear immediately after BC dismiss');
+
+        // C. Stock BMW TrueType rasterizer + CJK NFC & 1:1 vector Gothic check (incl. '季節は次々死んでいく', SC/TC/KR)
+        const { cleanMediaText } = require(path.join(APP_DIR, 'media_tracker'));
+        const jpFixed = cleanMediaText('季節は次々死んでいく');
+        assert.strictEqual(jpFixed, '季節は次々死んでいく', 'cleanMediaText must keep voiced kana (で U+3067) NFC-composed');
+        assert.strictEqual(jpFixed.indexOf('\u3099'), -1, 'cleanMediaText must never leave dangling NFD combining dakuten U+3099');
+        assert.strictEqual(cleanMediaText('밤편지 - 아이유'), '밤편지 - 아이유', 'cleanMediaText must preserve NFC Korean Hangul');
+        assert.strictEqual(cleanMediaText('Caf\u00E9 R\u00E9sum\u00E9'), 'Cafe Resume', 'cleanMediaText must still fold Latin accents');
+
+        const fontsMod = require('./kit/fonts');
+        const { getFontStatus } = require(path.join(APP_DIR, 'bmw_font'));
+        const fSt = getFontStatus();
+        assert(fSt.source === 'bmw_stock_ttf' || fSt.source === 'bundled_vector_sans',
+            'font engine must activate 1:1 vector Latin (BMW TTF or bundled Vector Sans), got ' + fSt.source);
+        const f42 = fontsMod.get('bold', 42, jpFixed);
+        assert.strictEqual(f42.size, 42, 'vector font handle must match exact requested pixel size (1:1 scale, zero bilinear blur)');
+        for (const ch of '季節は次々死んでいく七里香周杰伦밤편지') {
+            const rg = fontsMod.resolveGlyph(f42, ch.codePointAt(0));
+            assert(rg && rg.g && rg.g[2] >= 12 && rg.g[3] >= 12 && rg.font.size === 42, 'vector CJK must rasterize exact 1:1 glyph for ' + ch);
+        }
+
+        const localFontRg = path.resolve(ROOT, '..', 'mgu-fonts', 'mnt-dataro-dataro2-hmi-common-font', 'BMWTARG.ttf');
+        if (fs.existsSync(localFontRg)) {
+            const parsedRg = parseTtf(fs.readFileSync(localFontRg));
+            assert(parsedRg && parsedRg.numGlyphs > 200, 'BMWTARG.ttf must parse cleanly');
+            const atlas = bakeSizeAtlas(parsedRg, 36, '19:39 Tire Pressure Low', 0.016);
+            assert(atlas.atlasW > 64 && atlas.glyphs[57] && atlas.glyphs[57][2] > 10, 'BMWTARG.ttf must rasterize crisp glyphs');
+        }
     });
 
     console.log('\nAll ' + passed + ' tests passed.');

@@ -631,7 +631,7 @@ class LeadVehicleTracker {
 
 /**
  * Derive signed UTC offset (minutes, snapped to 15-min timezone increments) by comparing
- * BMW's local clock (`AutoTime.current` or `KombiIF.timeDate`) against JS UTC time.
+ * a local H:M clock against JS UTC time. Used only when no full year/month/day is available.
  */
 function calcCarClockOffsetMin(hour, minute, nowMs) {
     if (typeof hour !== 'number' || typeof minute !== 'number' ||
@@ -645,6 +645,106 @@ function calcCarClockOffsetMin(hour, minute, nowMs) {
     if (diff > 720) diff -= 1440;
     const snapped = Math.round(diff / 15) * 15;
     return (snapped >= -720 && snapped <= 840) ? snapped : null;
+}
+
+/**
+ * Derive exact signed UTC offset (minutes, snapped to 15-min increments) from a full local
+ * date+time struct. Strictly rejects uninitialized zero structs (`year=0, hour=0, minute=0`)
+ * or 0xFF/0xFFFF invalid sentinels so `AutoTime.current` can never compute a bogus offset!
+ */
+function calcFullLocalDateOffsetMin(year, month, day, hour, minute, second, nowMs) {
+    if (typeof year !== 'number' || !isFinite(year) || year < 2020 || year > 2099) return null;
+    if (typeof month !== 'number' || !isFinite(month) || month < 1 || month > 12) return null;
+    if (typeof day !== 'number' || !isFinite(day) || day < 1 || day > 31) return null;
+    if (typeof hour !== 'number' || !isFinite(hour) || hour < 0 || hour > 23) return null;
+    if (typeof minute !== 'number' || !isFinite(minute) || minute < 0 || minute > 59) return null;
+    const sec = (typeof second === 'number' && isFinite(second) && second >= 0 && second <= 59) ? Math.floor(second) : 0;
+    const refMs = typeof nowMs === 'number' && isFinite(nowMs) ? nowMs : Date.now();
+    const localAsUtcMs = Date.UTC(Math.floor(year), Math.floor(month) - 1, Math.floor(day), Math.floor(hour), Math.floor(minute), sec);
+    const diffMin = (localAsUtcMs - refMs) / 60000;
+    if (!isFinite(diffMin) || diffMin < -780 || diffMin > 870) return null;
+    const snapped = Math.round(diffMin / 15) * 15;
+    return (snapped >= -720 && snapped <= 840) ? snapped : null;
+}
+
+function calcAutoTimeOffsetMin(v, nowMs) {
+    if (!v || typeof v !== 'object') return null;
+    const tm = v.time;
+    const dt = v.date;
+    if (!tm || typeof tm !== 'object' || !dt || typeof dt !== 'object') return null;
+    return calcFullLocalDateOffsetMin(dt.year, dt.month, dt.day, tm.hour, tm.minute, tm.second, nowMs);
+}
+
+function calcKombiShowTimeOffsetMin(v, nowMs) {
+    if (!v || typeof v !== 'object') return null;
+    // statusDisplayClockTimeDate === 15 or displayHour >= 24 means invalid/uninitialized
+    if (v.statusDisplayClockTimeDate === 15) return null;
+    return calcFullLocalDateOffsetMin(
+        v.displayDateYear,
+        v.displayDateMonth,
+        v.displayDateDay,
+        v.displayHour,
+        v.displayMinute,
+        v.displaySecond,
+        nowMs
+    );
+}
+
+/**
+ * Parse `de.bmw.infotainment.hmi.commontypes.CommonTypes.TimeZone` (both string names like
+ * `'UTC_MINUS_0800_1'` / `'UTC_PLUS_0530'` and numeric enum values `1..87`).
+ */
+function parseHmiTimeZoneOffsetMin(v) {
+    let raw = v;
+    if (raw && typeof raw === 'object') {
+        raw = raw.name !== undefined ? raw.name : (raw.value !== undefined ? raw.value : raw.currentTimeZone);
+    }
+    if (typeof raw === 'string') {
+        const u = raw.trim().toUpperCase();
+        if (!u || u === 'UNKNOWN') return null;
+        if (/^UTC_0000/.test(u)) return 0;
+        const m = u.match(/^UTC_(MINUS|PLUS)_(\d{2})(\d{2})/);
+        if (m) {
+            const sign = m[1] === 'MINUS' ? -1 : 1;
+            return sign * ( parseInt(m[2], 10) * 60 + parseInt(m[3], 10) );
+        }
+        if (/^\d+$/.test(u)) raw = parseInt(u, 10);
+    }
+    if (typeof raw === 'number' && isFinite(raw)) {
+        const n = Math.round(raw);
+        if (n <= 0 || n > 87) return null;
+        if (n === 1) return -660;
+        if (n === 2) return -600;
+        if (n === 3) return -540;
+        if (n >= 4 && n <= 6) return -480;
+        if (n >= 7 && n <= 10) return -420;
+        if (n >= 11 && n <= 15) return -360;
+        if (n >= 16 && n <= 19) return -300;
+        if (n === 20) return -270;
+        if (n >= 21 && n <= 27) return -240;
+        if (n === 28) return -210;
+        if (n >= 29 && n <= 33) return -180;
+        if (n >= 34 && n <= 35) return -60;
+        if (n >= 36 && n <= 38) return 0;
+        if (n >= 39 && n <= 42) return 60;
+        if (n >= 43 && n <= 52) return 120;
+        if (n >= 53 && n <= 54) return 180;
+        if (n === 55) return 210;
+        if (n >= 56 && n <= 60) return 240;
+        if (n >= 61 && n <= 63) return 300;
+        if (n === 64) return 330;
+        if (n === 65) return 345;
+        if (n >= 66 && n <= 67) return 360;
+        if (n === 68) return 390;
+        if (n >= 69 && n <= 70) return 420;
+        if (n >= 71 && n <= 73) return 480;
+        if (n >= 74 && n <= 75) return 540;
+        if (n >= 76 && n <= 77) return 570;
+        if (n >= 78 && n <= 82) return 600;
+        if (n >= 83 && n <= 84) return 660;
+        if (n >= 85 && n <= 87) return 720;
+    }
+    return null;
 }
 
 function localHmFromMs(ms, localOffsetMin) {
@@ -1742,14 +1842,23 @@ class SignalHub {
             statusKombiSelection: (v) => {
                 this.mediaTracker.feedKombiSelection(v, Date.now());
             },
+            statusShowTimeDate: (v) => {
+                const off = calcKombiShowTimeOffsetMin(v, Date.now());
+                if (off !== null) {
+                    this.live.carClockOffsetMin = off;
+                    this.live.carClockSource = 'kombi_clock';
+                }
+            },
             timeDateUTC: (v) => {
                 if (!v || typeof v !== 'object') return;
-                // BMW BN2020 timeDateUTC: timeZonesOffsetAutomaticallyUTC (15-min steps, 48 = UTC+0; 255 = invalid)
+                // BMW BN2020 timeDateUTC: timeZonesOffsetAutomaticallyUTC (15-min steps, 48 = UTC+0; 255 = invalid),
+                // offsetWintertimeSummertimeUTC (hours: 0 = winter/std, 1 = +1h summer DST, 15 = invalid).
                 const rawTz = v.timeZonesOffsetAutomaticallyUTC;
-                if (typeof rawTz === 'number' && rawTz < 200 && this.live.carClockSource !== 'autotime') {
-                    const dstRaw = (typeof v.offsetWintertimeSummertimeUTC === 'number' && v.offsetWintertimeSummertimeUTC < 12)
+                if (typeof rawTz === 'number' && rawTz < 200 &&
+                    this.live.carClockSource !== 'kombi_clock' && this.live.carClockSource !== 'autotime') {
+                    const dstRaw = (typeof v.offsetWintertimeSummertimeUTC === 'number' && v.offsetWintertimeSummertimeUTC < 4)
                         ? v.offsetWintertimeSummertimeUTC : 0;
-                    const offMin = (rawTz - 48) * 15 + dstRaw * 15;
+                    const offMin = (rawTz - 48) * 15 + dstRaw * 60;
                     if (offMin >= -720 && offMin <= 840) {
                         this.live.carClockOffsetMin = offMin;
                         this.live.carClockSource = 'kombi_utc';
@@ -1760,14 +1869,34 @@ class SignalHub {
 
         watchInst('com.harman.infotainment.systeminfrastructure.autotime.autotime.AutoTime', 'Inst1', {
             current: (v) => {
-                const tm = v && v.time;
-                if (!tm || typeof tm !== 'object') return;
-                const off = calcCarClockOffsetMin(tm.hour, tm.minute, Date.now());
+                if (this.live.carClockSource === 'kombi_clock') return;
+                const off = calcAutoTimeOffsetMin(v, Date.now());
                 if (off !== null) {
                     this.live.carClockOffsetMin = off;
                     this.live.carClockSource = 'autotime';
                 }
             },
+        });
+
+        watchInst('de.bmw.infotainment.hmi.hmicontext.HMIContext', 'HMI_CID', {
+            currentTimeZone: (v) => {
+                if (this.live.carClockSource === 'kombi_clock' ||
+                    this.live.carClockSource === 'autotime' ||
+                    this.live.carClockSource === 'kombi_utc') {
+                    return;
+                }
+                const off = parseHmiTimeZoneOffsetMin(v);
+                if (off !== null) {
+                    this.live.carClockOffsetMin = off;
+                    this.live.carClockSource = 'hmi_tz';
+                }
+            },
+        });
+
+        watch('de.bmw.body.Light', {
+            StatusFunctionsIndicators: (v) => this.mediaTracker.feedTurnSignal(v, Date.now()),
+            IndicatorSteeringColumn: (v) => this.mediaTracker.feedStalk(v, Date.now()),
+            IndicatorSteeringColumnComplete: (v) => this.mediaTracker.feedStalk(v, Date.now()),
         });
 
         watch('de.bmw.infotainment.vehicle.TPMS', {
@@ -1992,7 +2121,7 @@ class SignalHub {
 
         if (wantMedia && !this._mediaActive) {
             this._mediaActive = true;
-            this.mediaTracker.start(this.ctx, this.log);
+            this.mediaTracker.start(this.ctx, this.log, { skipStalk: true });
         } else if (!wantMedia && this._mediaActive) {
             this._mediaActive = false;
             this.mediaTracker.stop();
@@ -2856,7 +2985,7 @@ module.exports = {
     SignalHub, GearGuess, FastKw, DemoGenerator, LeadVehicleTracker,
     decodeStatusBattery2, decodeCabinTemp,
     createHvacState, feedHvacClimate2, feedHvacClimateMaster, resolveHvacMode,
-    calcCarClockOffsetMin,
+    calcCarClockOffsetMin, calcFullLocalDateOffsetMin, calcAutoTimeOffsetMin, calcKombiShowTimeOffsetMin, parseHmiTimeZoneOffsetMin,
     computeFrictionBrake, computeChargingState, decodeDscPressure, decodeDscPedal, decodeDscRegen,
     flagActive, gearOf, stageOf, selectionOf, programOf, driveModeOf,
 };
