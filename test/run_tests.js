@@ -999,21 +999,63 @@ function inBox(x, y, box) {
                 Object.keys(spec).forEach((k) => {
                     if (k === '_optional' || k === '_instances') return;
                     if (k === '_methods') {
-                        spec._methods.forEach((m) => assert(m in catMethods, iname + ' missing method ' + m));
+                        spec._methods.forEach((m) => {
+                            const md = catMethods[m];
+                            assert(md && (md.id || md.methodId), iname + ' missing or zero-ID method ' + m);
+                        });
                         return;
                     }
                     if (k === '_broadcasts') {
-                        spec._broadcasts.forEach((b) => assert(b in catEvents, iname + ' missing broadcast ' + b));
+                        spec._broadcasts.forEach((b) => {
+                            const ev = catEvents[b];
+                            assert(ev && (ev.id || ev.eventId), iname + ' missing or zero-ID broadcast ' + b);
+                        });
                         return;
                     }
                     const cf = catFields[k];
                     assert(cf, iname + ' missing field ' + k);
                     const flags = String(spec[k]);
-                    if (flags.indexOf('r') >= 0) assert(cf.getter, iname + '.' + k + ' requested "r" but has no getter on G30');
-                    if (flags.indexOf('s') >= 0) assert(cf.notifier, iname + '.' + k + ' requested "s" but has no notifier on G30');
-                    if (flags.indexOf('w') >= 0) assert(cf.setter, iname + '.' + k + ' requested "w" but has no setter on G30');
+                    // CRITICAL: MainApp's generateSomeipInterfaces treats { id: 0 } as NO getter/notifier/setter!
+                    if (flags.indexOf('r') >= 0) {
+                        assert(cf.getter && cf.getter.id, iname + '.' + k + ' requested "r" but getter.id is 0/missing on G30: ' + JSON.stringify(cf));
+                    }
+                    if (flags.indexOf('s') >= 0) {
+                        assert(cf.notifier && cf.notifier.id, iname + '.' + k + ' requested "s" but notifier.id is 0/missing on G30: ' + JSON.stringify(cf));
+                    }
+                    if (flags.indexOf('w') >= 0) {
+                        assert(cf.setter && cf.setter.id, iname + '.' + k + ' requested "w" but setter.id is 0/missing on G30: ' + JSON.stringify(cf));
+                    }
                 });
             });
+
+            // Also audit the built source/manifest.json (with ${userId} -> 12252) exactly as MainApp's generateSomeipInterfaces does
+            const builtManPath = path.join(ROOT, 'dist', 'cluster_metrics', 'source', 'manifest.json');
+            if (fs.existsSync(builtManPath)) {
+                const rawMan = fs.readFileSync(builtManPath, 'utf8').split('${userId}').join('12252');
+                const builtMan = JSON.parse(rawMan);
+                ['proxies', 'services'].forEach((sec) => {
+                    const map = builtMan[sec] || {};
+                    Object.keys(map).forEach((iname) => {
+                        const inf = ifaces[iname];
+                        assert(inf, 'built manifest ' + sec + ' missing interface in G30 catalog: ' + iname);
+                        const spec = map[iname];
+                        if (spec === '*') return;
+                        const insts = Array.isArray(spec.instances) ? spec.instances : (spec.instances ? [spec.instances] : []);
+                        insts.forEach((inst) => {
+                            if (inst === '*') return;
+                            assert(instMap[iname] && (inst in instMap[iname]), 'built manifest bad instance ' + iname + '[' + inst + ']');
+                        });
+                        Object.keys(spec.attributes || {}).forEach((attr) => {
+                            const f = inf.fields && inf.fields[attr];
+                            assert(f, 'built manifest missing field ' + iname + '.' + attr);
+                            const fl = String(spec.attributes[attr]);
+                            if (fl.indexOf('r') >= 0) assert(f.getter && f.getter.id, 'built manifest zero/missing getter.id on ' + iname + '.' + attr);
+                            if (fl.indexOf('s') >= 0) assert(f.notifier && f.notifier.id, 'built manifest zero/missing notifier.id on ' + iname + '.' + attr);
+                            if (fl.indexOf('w') >= 0) assert(f.setter && f.setter.id, 'built manifest zero/missing setter.id on ' + iname + '.' + attr);
+                        });
+                    });
+                });
+            }
         }
     });
 

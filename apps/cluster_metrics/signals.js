@@ -1746,7 +1746,7 @@ class SignalHub {
                 if (!v || typeof v !== 'object') return;
                 // BMW BN2020 timeDateUTC: timeZonesOffsetAutomaticallyUTC (15-min steps, 48 = UTC+0; 255 = invalid)
                 const rawTz = v.timeZonesOffsetAutomaticallyUTC;
-                if (typeof rawTz === 'number' && rawTz < 200 && this.live.carClockSource !== 'autotime' && this.live.carClockSource !== 'kombi_local') {
+                if (typeof rawTz === 'number' && rawTz < 200 && this.live.carClockSource !== 'autotime') {
                     const dstRaw = (typeof v.offsetWintertimeSummertimeUTC === 'number' && v.offsetWintertimeSummertimeUTC < 12)
                         ? v.offsetWintertimeSummertimeUTC : 0;
                     const offMin = (rawTz - 48) * 15 + dstRaw * 15;
@@ -1757,17 +1757,6 @@ class SignalHub {
                 }
             },
         });
-
-        watch('de.bmw.infotainment.KombiIF', {
-            timeDate: (v) => {
-                if (!v || typeof v !== 'object') return;
-                const off = calcCarClockOffsetMin(v.operationHour, v.operationMinute, Date.now());
-                if (off !== null) {
-                    this.live.carClockOffsetMin = off;
-                    this.live.carClockSource = 'kombi_local';
-                }
-            },
-        }, { pollMs: 60000 });
 
         watchInst('com.harman.infotainment.systeminfrastructure.autotime.autotime.AutoTime', 'Inst1', {
             current: (v) => {
