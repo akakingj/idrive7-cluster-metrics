@@ -47,7 +47,8 @@ const {
     SignalHub, FastKw, LeadVehicleTracker, decodeStatusBattery2, decodeCabinTemp,
     createHvacState, feedHvacClimate2, feedHvacClimateMaster, resolveHvacMode,
     calcCarClockOffsetMin,
-    computeFrictionBrake, computeChargingState, decodeDscPressure, decodeDscPedal, decodeDscRegen, flagActive,
+    computeFrictionBrake, computeChargingState, computeIceBatteryCharge, decodeIceStartReason,
+    decodeDscPressure, decodeDscPedal, decodeDscRegen, flagActive,
 } = require(path.join(APP_DIR, 'signals'));
 const { NavTracker, parseHudStatusText, parseWazeHudShowing } = require(path.join(APP_DIR, 'nav_tracker'));
 const {
@@ -2574,6 +2575,173 @@ function inBox(x, y, box) {
         const botBarRight = maxCyanX(429);
         assert(topBarRight > botBarRight + 8,
             'Media progress bar must slant "/" (top-right > bottom-right), got top=' + topBarRight + ' vs bot=' + botBarRight);
+    });
+
+    /* 25. Option D: Idle Brake-Rail Engine Battery-Charge Bar (PHEV), FastKw ICE Gate & Instant Brake Yield */
+    await test('Option D: Idle brake_rail shows ICE -> HV battery charging, rejects DFCO/regen, keeps RPM+Boost & Media intact, and yields 0ms on brake', async () => {
+        // 1. decodeIceStartReason handles numeric codes and BMW enum strings
+        assert.strictEqual(decodeIceStartReason({ displaySwitchOffPreventionCombustionEngineReason: 3 }), 'LOW_SOC');
+        assert.strictEqual(decodeIceStartReason({ displaySwitchOffPreventionCombustionEngineReason: 'VM_LAEUFT_WEGEN_BATTERIELADEZUSTAND' }), 'LOW_SOC');
+        assert.strictEqual(decodeIceStartReason({ displaySwitchOffPreventionCombustionEngineReason: 'KEIN_ENGOFFPROHIBITOR' }), 'NONE');
+        assert.strictEqual(decodeIceStartReason({ displaySwitchOffPreventionCombustionEngineReason: 255 }), null);
+
+        // 2. computeIceBatteryCharge unit matrix
+        const st = {};
+        // Pure EV regen (rpm=0) -> rejected
+        let c = computeIceBatteryCharge({ speedKmh: 65, rpm: 0, engineOn: false, hvKw: -18.0, pedalPct: 0, torqueNm: 0 }, st, 1000);
+        assert.strictEqual(c.active, false);
+
+        // Manual-throttle low-SoC cruise charging -> active!
+        c = computeIceBatteryCharge({ speedKmh: 102, rpm: 1780, engineOn: true, hvKw: -6.0, pedalPct: 24, torqueNm: 138, isDfco: false }, st, 2000);
+        assert.strictEqual(c.active, true);
+        assert(Math.abs(c.chargeKw - 6.0) < 0.05);
+
+        // Brief 400ms 8HP upshift dip while still running & unbraked -> held smoothly without blinking
+        c = computeIceBatteryCharge({ speedKmh: 103, rpm: 1420, engineOn: true, hvKw: -0.1, pedalPct: 22, torqueNm: 60, isDfco: false }, st, 2400);
+        assert.strictEqual(c.active, true);
+        assert(Math.abs(c.chargeKw - 6.0) < 0.05);
+
+        // Highway lift-off DFCO wheel regen with spinning ICE (rpm=1750, hvKw=-16.5, torqueNm=-24, isDfco=true) -> immediately rejected!
+        c = computeIceBatteryCharge({ speedKmh: 98, rpm: 1750, engineOn: true, hvKw: -16.5, pedalPct: 0, torqueNm: -24, isDfco: true }, st, 2500);
+        assert.strictEqual(c.active, false);
+
+        // Off-throttle coasting without torque proof (pedalPct=0, torqueNm=null) -> rejected!
+        c = computeIceBatteryCharge({ speedKmh: 90, rpm: 1600, engineOn: true, hvKw: -11.0, pedalPct: 0, torqueNm: null, isDfco: false }, st, 3000);
+        assert.strictEqual(c.active, false);
+
+        // Hands-free ACC highway cruise (pedalPct=0, positive DME torqueNm=132, recupPct=0, gLong=0.0) -> active!
+        c = computeIceBatteryCharge({ speedKmh: 108, rpm: 1680, engineOn: true, hvKw: -5.8, pedalPct: 0, torqueNm: 132, recupPct: 0, gLong: 0.0, isDfco: false }, st, 4000);
+        assert.strictEqual(c.active, true);
+        assert(Math.abs(c.chargeKw - 5.8) < 0.05);
+
+        // Stationary red-light idle generation (speedKmh=0, rpm=1050, hvKw=-3.2, unplugged) -> active!
+        const stIdle = {};
+        c = computeIceBatteryCharge({ speedKmh: 0, rpm: 1050, engineOn: true, hvKw: -3.2, pedalPct: 0, torqueNm: 38, plugConnected: false }, stIdle, 5000);
+        assert.strictEqual(c.active, true);
+        assert(Math.abs(c.chargeKw - 3.2) < 0.05);
+
+        // Plug-in shore charging -> rejected!
+        c = computeIceBatteryCharge({ speedKmh: 0, rpm: 1050, engineOn: true, hvKw: -3.5, plugConnected: true }, stIdle, 5200);
+        assert.strictEqual(c.active, false);
+
+        // 3. FastKw ICE gate in SignalHub: steady-throttle ICE charging (needle 0/0, udsKw=-6.4) must NOT be masked by FastKw!
+        const appSpec = JSON.parse(fs.readFileSync(path.join(APP_DIR, 'app.json'), 'utf8'));
+        const hub = new SignalHub({
+            spec: appSpec,
+            settings: { values: { enabled: true, demo: 'off', vehicle: 'phev', iceChargeBar: true }, get(k) { return this.values[k]; } },
+            signals: null,
+            log: { info() {}, warn() {}, error() {} },
+        }, { noDiag: true, ipcDir: path.join(os.tmpdir(), 'cm-no-ipc-' + process.pid), edriveSharedPath: '' });
+        const now0 = Date.now();
+        hub.lastRealSignalT = now0;
+        // Pre-train FastKw in pure EV mode so fastKw.now() would return ~+0.6 kW at needle [0, 0]
+        for (let k = 0; k < 6; k++) {
+            hub.fastKw.needle(20, 0, now0 - 1500 + k * 100);
+            hub.fastKw.reading(17.6, now0 - 1480 + k * 100);
+        }
+        hub.fastKw.needle(0, 0, now0);
+        const thetaRestBefore = hub.fastKw.theta[2];
+        assert(hub.fastKw.now(now0) !== null, 'FastKw must be primed in EV mode');
+
+        // Switch to ICE running (rpm=1780) with SME udsKw = -6.4 kW
+        hub.live.stage = 'D';
+        hub.live.speedKmh = 102;
+        hub.live.rpm = 1780;
+        hub.live.udsKw = -6.4;
+        hub.live.udsKwT = now0;
+        const snapIce = hub.snapshot(now0);
+        assert.strictEqual(snapIce.hvKw, -6.4, 'snapshot() must report raw SME udsKw (-6.4 kW) instead of FastKw when ICE is running');
+        assert.strictEqual(hub.fastKw.theta[2], thetaRestBefore, 'EV resting offset theta[2] must stay uncorrupted');
+
+        // Demand gating of Efficiencytainment (effReason) when iceChargeBar is toggled off
+        hub._started = true;
+        hub.ctx.signals = {
+            watch() {
+                let closed = false;
+                return Promise.resolve({ shutdown() { closed = true; }, get closed() { return closed; } });
+            },
+        };
+        hub.syncDemand({ enabled: true, vehicle: 'phev', iceChargeBar: true }, {});
+        assert.strictEqual(hub.activeWatchers().effReason, true, 'effReason must watch when iceChargeBar is enabled on PHEV');
+        hub.syncDemand({ enabled: true, vehicle: 'phev', iceChargeBar: false }, {});
+        assert.strictEqual(hub.activeWatchers().effReason, false, 'effReason must tear down when iceChargeBar is disabled');
+        hub.stop();
+
+        // 4. OverlayRenderer Option D visual rendering, layout isolation & 0ms brake priority
+        const r = new OverlayRenderer({ allowPanel: true });
+        const baseModel = {
+            units: unitsMod.US_PRESET,
+            profile: { vehicleType: 'phev', engineOn: true, mode: 'gas_warm', isEv: false, isCold: false, coldCeilingRpm: null, alert: null },
+            efficiency: { evKmPerKwh: 5.8, fuelLPer100km: 10.8, isDfco: false },
+            telemetry: {
+                speedKmh: 102, rpm: 1780, boostBar: 0.14, hvKw: -6.0, soc: 11, soc12: 88,
+                oilTempC: 92, coolantTempC: 90, pedalPct: 24, torqueNm: 140, gLong: 0.02,
+                stage: 'D', program: 'D', gear: 7, frictionG: 0, driverBraking: false,
+                media: { active: true, playing: true, title: 'Night Drive', artist: 'amazarashi', totalSec: 200, elapsedSec: 80, remainSec: 120, frac: 0.4, bcStep: 0 },
+            },
+        };
+        r.render(baseModel, { enabled: true, widgetMedia: true, brakeIndicator: 'bar_num', iceChargeBar: true, hudLine3: 'brake' }, 10000);
+
+        assert.strictEqual(r.lastSummary.iceChargeActive, true);
+        assert.strictEqual(r.lastSummary.iceChargeLit, 8, '6.0 / 15.0 kW must light 8/20 left-to-right segments');
+        assert.strictEqual(r.lastSummary.subText, '1780 RPM  +2.0 PSI', 'Line 2 RPM + Boost must stay 100% untouched');
+        assert.strictEqual(r.lastSummary.rightWidgetPage, 'media', 'Now Playing media card must remain active on right wing');
+
+        const brCv = r.layers.brake_rail.cv;
+        // Leftmost segment (x=6, y=24) must be bright cyan (#38c7ff -> R=56, G=199, B=255), while rightmost (x=288, y=24) stays dim
+        const leftOff = (24 * brCv.w + 6) * 4;
+        const rightOff = (24 * brCv.w + 288) * 4;
+        assert(brCv.d[leftOff + 1] > 180 && brCv.d[leftOff + 2] > 240 && brCv.d[leftOff + 3] === 255, 'Leftmost brake_rail segment must be lit cyan');
+        assert(brCv.d[rightOff + 3] < 160, 'Rightmost brake_rail segment must stay dim at 8/20');
+
+        // Top half (y=0..18): 'CHG +6.0 kW' text + bolt sits strictly on left (x < 160), leaving KOMBI4 'Power %' (x >= 195) 100% clear!
+        let leftLabelPx = 0;
+        let powerPctZonePx = 0;
+        for (let py = 0; py < 19; py++) {
+            for (let px = 0; px < brCv.w; px++) {
+                if (brCv.d[(py * brCv.w + px) * 4 + 3] > 0) {
+                    if (px < 165) leftLabelPx++;
+                    if (px >= 195) powerPctZonePx++;
+                }
+            }
+        }
+        assert(leftLabelPx > 80, 'expected bolt + CHG +6.0 kW label in left half of brake_rail');
+        assert.strictEqual(powerPctZonePx, 0, 'CHG label must stay 100% clear of stock Power % label on right');
+
+        // HUD Line 3 ('brake') must also render cyan charge bar + '+6.0 kW'
+        const hudCv = r.layers.hud_main.cv;
+        let hudRow3Cyan = 0;
+        for (let py = 74; py < 98; py++) {
+            for (let px = 4; px < hudCv.w; px++) {
+                const o = (py * hudCv.w + px) * 4;
+                if (hudCv.d[o + 1] > 180 && hudCv.d[o + 2] > 240 && hudCv.d[o + 3] > 200) hudRow3Cyan++;
+            }
+        }
+        assert(hudRow3Cyan > 60, 'HUD Line 3 brake slot must render cyan ICE charge bar & kW');
+
+        // bar_only mode hides text above segments while keeping cyan segments lit
+        r.render(baseModel, { enabled: true, brakeIndicator: 'bar_only', iceChargeBar: true }, 10200);
+        let barOnlyTopPx = 0;
+        for (let py = 0; py < 19; py++) {
+            for (let px = 0; px < brCv.w; px++) {
+                if (brCv.d[(py * brCv.w + px) * 4 + 3] > 0) barOnlyTopPx++;
+            }
+        }
+        assert.strictEqual(barOnlyTopPx, 0, 'bar_only must omit CHG +kW text above segments');
+
+        // Touching the brake yields in 0 ms to right-to-left Amber/Orange/Red friction brake!
+        const brakedModel = Object.assign({}, baseModel, {
+            telemetry: Object.assign({}, baseModel.telemetry, { pedalPct: 0, driverBraking: true, frictionG: 0.24, brakeBar: 18 }),
+        });
+        r.render(brakedModel, { enabled: true, brakeIndicator: 'bar_num', iceChargeBar: true }, 10250);
+        assert.strictEqual(r.lastSummary.iceChargeActive, false, 'ICE charge bar must yield in 0ms when braking');
+        assert(r.lastSummary.brakeLit >= 8, 'Friction brake segments must light immediately');
+        assert(brCv.d[rightOff + 0] > 220 && brCv.d[rightOff + 3] === 255, 'Rightmost segment must immediately switch to amber/orange brake color');
+
+        // Disabling iceChargeBar turns Option D off completely
+        r.render(baseModel, { enabled: true, brakeIndicator: 'bar_num', iceChargeBar: false }, 11000);
+        assert.strictEqual(r.lastSummary.iceChargeActive, false);
+        assert.strictEqual(r.lastSummary.iceChargeLit, 0);
     });
 
     console.log('\nAll ' + passed + ' tests passed.');

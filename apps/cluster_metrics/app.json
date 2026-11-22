@@ -2,7 +2,7 @@
   "id": "cluster_metrics",
   "title": "Cluster Metrics",
   "description": "Real-time efficiency, HV battery %, powertrain temperatures, gear in D, full-wing Right-Wing Media/Charging/Trip/TPMS & Alerts widget, HUD turn-by-turn nav, and live DSC hydraulic brake indicator for BMW iDrive 7",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "autostart": true,
   "license": "GPL-3.0-only",
   "vendor": "chyiz",
@@ -77,11 +77,16 @@
       "statusSwitchDriveDynamicSport2": "rs",
       "statusActualValueTorque2": "rs"
     },
+    "de.bmw.infotainment.drivingexcitement.Efficiencytainment": {
+      "_optional": "PHEV combustion engine start / switch-off prevention reason (low HV SoC, warmup, comfort)",
+      "statusReasonPowerUpCombustionEngine": "rs"
+    },
     "de.bmw.infotainment.drivingexcitement.Efficiencytainment2": {
-      "_optional": "PHEV high-voltage battery temperature, charge state, and real-time eDRIVE / regen needle %",
+      "_optional": "PHEV high-voltage battery temperature, charge state, operating mode, and real-time eDRIVE / regen needle %",
       "statusBatteryTemperature": "rs",
       "statusPowerRelativHybrid": "rs",
-      "statusChargeOfBatteryHybrid": "rs"
+      "statusChargeOfBatteryHybrid": "rs",
+      "statusOperatingModeHybrid": "rs"
     },
     "de.bmw.infotainment.lsc.LSCDataSink": {
       "_optional": "PHEV high-voltage battery pack voltage",
@@ -363,6 +368,7 @@
         "cabinTempDisplay",
         "hvSocGauge",
         "brakeIndicator",
+        "iceChargeBar",
         "cornerRightDisplay",
         "cornerLeftDisplay",
         "clusterNudgeX",
@@ -807,6 +813,12 @@
           "Off"
         ]
       ]
+    },
+    {
+      "key": "iceChargeBar",
+      "label": "Engine battery-charge bar (PHEV)",
+      "type": "bool",
+      "default": true
     },
     {
       "key": "smartAlerts",

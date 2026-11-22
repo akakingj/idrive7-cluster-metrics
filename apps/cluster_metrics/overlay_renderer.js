@@ -38,9 +38,29 @@ const {
 } = require('./hud_nav_renderer');
 const { buildStockBackdrop } = require('./image_decode');
 const { COVER_SIDE, paginateTitle, resolveRightWidgetPage } = require('./media_tracker');
+const { computeIceBatteryCharge } = require('./signals');
 
 const DEFAULT_CONF_DIR = '/var/opt/cluster-render';
 const DEFAULT_WAZE_STATUS = '/run/waze-on-cluster/status.json';
+const ICE_CHARGE_MAX_KW = 15.0;
+const BOLT_ROWS = [
+    [4, 3], [3, 4], [3, 3], [2, 4], [1, 4],
+    [0, 8], [0, 8],
+    [3, 4], [3, 3], [2, 4], [2, 3], [1, 3], [1, 2],
+];
+
+function drawLightningBolt(cv, x0, y0, col) {
+    cv.fillRect(x0 + 3, y0 - 1, 5, 1, COL.outline);
+    for (let r = 0; r < BOLT_ROWS.length; r++) {
+        const dx = BOLT_ROWS[r][0];
+        const w = BOLT_ROWS[r][1];
+        cv.fillRect(x0 + dx - 1, y0 + r, w + 2, 1, COL.outline);
+    }
+    cv.fillRect(x0, y0 + BOLT_ROWS.length, 4, 1, COL.outline);
+    for (let r = 0; r < BOLT_ROWS.length; r++) {
+        cv.fillRect(x0 + BOLT_ROWS[r][0], y0 + r, BOLT_ROWS[r][1], 1, col);
+    }
+}
 
 // Shifted +16px down so there is generous breathing room under the main digital speed digits while clearing the traffic light sign (>=536)
 const BELOW_SPEED_BASE = { x: 392, y: 445, w: 214, h: 84 };
@@ -478,6 +498,7 @@ class OverlayRenderer {
         this._activeAlertKey = '';
         this._alertBcBase = 0;
         this._alertDismissed = false;
+        this._iceChgState = {};
         this.lastSummary = {};
     }
 
@@ -787,6 +808,32 @@ class OverlayRenderer {
         const brakeLit = (!isParked && fg > 0.02) ? clamp(Math.round((fg / 0.55) * 20), 1, 20) : (brakeHold ? 1 : 0);
         const showBrakeRail = brakeMode !== 'off' && !isParked;
 
+        const iceChargeBarEnabled = s.iceChargeBar !== false;
+        const isPhevForIceChg = Boolean(profile && profile.vehicleType === 'phev');
+        const iceChgEval = (iceChargeBarEnabled && isPhevForIceChg && !isCharging && !isParked && brakeLit === 0)
+            ? computeIceBatteryCharge({
+                rpm: t.rpm,
+                engineOn: Boolean(profile && profile.engineOn),
+                speedKmh: t.speedKmh,
+                hvKw: t.hvKw,
+                pedalPct: t.pedalPct,
+                torqueNm: t.torqueNm,
+                recupPct: t.recupPct,
+                gLong: t.gLong,
+                driverBraking: t.driverBraking,
+                absActive: t.absActive,
+                frictionG: fg,
+                brakeBar: t.brakeBar,
+                isDfco: Boolean(eff.isDfco),
+                pureRegen: Boolean(t.pureRegen),
+                plugConnected: Boolean(chg && chg.plugConnected),
+                chargingActive: isCharging,
+            }, this._iceChgState, now)
+            : computeIceBatteryCharge({ chargingActive: true }, this._iceChgState, now);
+        const iceChargeActive = Boolean(iceChgEval && iceChgEval.active && brakeLit === 0);
+        const iceChargeKw = iceChargeActive ? iceChgEval.chargeKw : 0;
+        const iceChargeLit = iceChargeActive ? clamp(Math.round((iceChargeKw / ICE_CHARGE_MAX_KW) * 20), 1, 20) : 0;
+
         const showHvSocGauge = Boolean(
             panelAllowed &&
             hvSocGaugeEnabled &&
@@ -807,6 +854,7 @@ class OverlayRenderer {
         this.lastSummary = {
             hero, heroCol, heroUnitCol, subText, subCol, inNormalD, dGearText,
             isParked, isCharging, showBrakeRail, brakeHold,
+            iceChargeActive, iceChargeKw, iceChargeLit,
             panelAllowed, showHud, showOwnHudNav, showHudRoad, showHudHeadway, hudHeadwayMode,
             showHvSocGauge, showCabinTemp,
             wocHudOverlay, hudYieldedToNav, hudYieldReason,
@@ -874,7 +922,11 @@ class OverlayRenderer {
             };
             const lBr = this._ensureOrLocal('brake_rail', Object.assign({ target: 'panel', visible: showBrakeRail, z: 13 }, brRect));
             if (showBrakeRail) {
-                this._paintBrakeRail(lBr.cv, fg, brakeLit, Boolean(t.absActive), brakeMode === 'bar_num' && !brakeHold, t.brakeBar);
+                this._paintBrakeRail(
+                    lBr.cv, fg, brakeLit, Boolean(t.absActive),
+                    brakeMode === 'bar_num' && (brakeLit === 0 || !brakeHold),
+                    t.brakeBar, iceChargeKw, iceChargeLit
+                );
                 this._setVisible('brake_rail', true);
                 this._upload('brake_rail');
             } else {
@@ -1043,7 +1095,7 @@ class OverlayRenderer {
                 hero, heroCol, heroUnitCol, subText, subCol,
                 gearDisplay !== 'off' ? dGearText : '',
                 t, profile, units, fg, brakeLit, brakeHold, activeAlert,
-                showHudRoad, showHudHeadway
+                showHudRoad, showHudHeadway, iceChargeKw
             );
             this._setVisible('hud_main', true);
             this._upload('hud_main');
@@ -1138,7 +1190,8 @@ class OverlayRenderer {
             if (showMapRight) {
                 this._paintMapRight(
                     lMapRight.cv, gearOnMapRight, t, units, cornerRightMode,
-                    showBrakeRail, brakeMode === 'bar_num' && !brakeHold, fg, brakeLit, Boolean(t.absActive), alertMap
+                    showBrakeRail, brakeMode === 'bar_num' && (brakeLit === 0 || !brakeHold),
+                    fg, brakeLit, Boolean(t.absActive), alertMap, iceChargeKw
                 );
                 this._setVisible('map_right', true);
                 this._upload('map_right');
@@ -1239,12 +1292,13 @@ class OverlayRenderer {
         drawTextOutline(cv, pct + '%', 46, 47, 29, col, { font: 'num', align: 'center' });
     }
 
-    _paintBrakeRail(cv, fg, litCount, absActive, showNum, brakeBar) {
+    _paintBrakeRail(cv, fg, litCount, absActive, showNum, brakeBar, iceChargeKw, iceChargeLit) {
         cv.clear(COL.clear);
         const SEG_N = 20;
         const barX0 = 2;
         const barX1 = 294;
         const segW = (barX1 - barX0) / SEG_N;
+        const chgLit = (litCount === 0 && typeof iceChargeLit === 'number' && iceChargeLit > 0) ? iceChargeLit : 0;
 
         for (let i = 0; i < SEG_N; i++) {
             const sx1 = Math.round(barX1 - i * segW) - 1;
@@ -1252,6 +1306,8 @@ class OverlayRenderer {
             let col = COL.railDim;
             if (litCount > 0 && i < litCount) {
                 col = i >= 13 ? COL.red : (i >= 6 ? COL.orange : COL.amber);
+            } else if (chgLit > 0 && (SEG_N - 1 - i) < chgLit) {
+                col = COL.cyan;
             }
             cv.fillRect(sx0, 21, Math.max(2, sx1 - sx0), 7, col);
         }
@@ -1262,6 +1318,9 @@ class OverlayRenderer {
             const lbl = (absActive ? 'ABS ' : '') + valStr;
             const col = (fg >= 0.36 || absActive) ? COL.red : COL.amber;
             drawTextOutline(cv, lbl, 3, 15, 15, col, { font: 'bold', align: 'left' });
+        } else if (chgLit > 0 && showNum && typeof iceChargeKw === 'number' && isFinite(iceChargeKw)) {
+            drawLightningBolt(cv, 3, 2, COL.cyan);
+            drawTextOutline(cv, 'CHG +' + iceChargeKw.toFixed(1) + ' kW', 14, 15, 15, COL.cyan, { font: 'bold', align: 'left' });
         }
     }
 
@@ -1714,7 +1773,7 @@ class OverlayRenderer {
         }
     }
 
-    _paintHud(cv, lineModes, hero, heroCol, heroUnitCol, subText, subCol, gearStr, t, profile, units, fg, brakeLit, brakeHold, alertObj, compactBelowRoad, headwayShown) {
+    _paintHud(cv, lineModes, hero, heroCol, heroUnitCol, subText, subCol, gearStr, t, profile, units, fg, brakeLit, brakeHold, alertObj, compactBelowRoad, headwayShown, iceChargeKw) {
         cv.clear(COL.clear); // Borderless 3-line black-outlined text (strictly y=100..200 <= 202 ACC)
         const compact = Boolean(compactBelowRoad);
         const modes = Array.isArray(lineModes) ? lineModes.slice(0, 3) : ['efficiency_gear', 'power', 'brake'];
@@ -1811,6 +1870,22 @@ class OverlayRenderer {
                         const bStr = hasBar ? (Math.round(t.brakeBar) + ' bar') : (fg.toFixed(2) + 'g');
                         drawTextOutline(cv, bStr, 6 + hSegs * stepX + 6, compact ? by : (by - 3), compact ? 14 : 15, fg >= 0.36 ? COL.red : COL.amber, { font: 'bold', align: 'left' });
                     }
+                } else if (typeof iceChargeKw === 'number' && isFinite(iceChargeKw) && iceChargeKw > 0) {
+                    const hSegs = compact ? 10 : 12;
+                    const stepX = compact ? 13 : 14;
+                    const hChgLit = clamp(Math.round((iceChargeKw / ICE_CHARGE_MAX_KW) * hSegs), 1, hSegs);
+                    const segH = compact ? 5 : 6;
+                    const segY = compact ? (by - 7) : (by - 11);
+                    for (let i = 0; i < hSegs; i++) {
+                        const sx = 6 + i * stepX;
+                        const sc = i < hChgLit ? COL.cyan : COL.mapRailDim;
+                        cv.fillRect(sx - 1, segY - 1, stepX - 1, segH + 2, COL.outline);
+                        cv.fillRect(sx, segY, stepX - 3, segH, sc);
+                    }
+                    const txBaseY = compact ? by : (by - 3);
+                    const boltX = 6 + hSegs * stepX + 4;
+                    drawLightningBolt(cv, boltX, txBaseY - 12, COL.cyan);
+                    drawTextOutline(cv, '+' + iceChargeKw.toFixed(1) + ' kW', boltX + 11, txBaseY, compact ? 14 : 15, COL.cyan, { font: 'bold', align: 'left' });
                 }
             }
         }
@@ -1838,7 +1913,7 @@ class OverlayRenderer {
         }
     }
 
-    _paintMapRight(cv, gearStr, t, units, cornerRightMode, showBrakeRail, showBrakeNum, fg, litCount, absActive, alertObj) {
+    _paintMapRight(cv, gearStr, t, units, cornerRightMode, showBrakeRail, showBrakeNum, fg, litCount, absActive, alertObj, iceChargeKw) {
         cv.clear(COL.clear);
 
         const mapAlertTxt = alertObj && (alertObj.hudText || alertObj.label);
@@ -1851,10 +1926,18 @@ class OverlayRenderer {
             const mLit = litCount > 0
                 ? (litCount === 1 && fg <= 0.02 ? 1 : clamp(Math.round((fg / 0.55) * segN), 1, segN))
                 : 0;
+            const mChgLit = (mLit === 0 && typeof iceChargeKw === 'number' && isFinite(iceChargeKw) && iceChargeKw > 0)
+                ? clamp(Math.round((iceChargeKw / ICE_CHARGE_MAX_KW) * segN), 1, segN)
+                : 0;
             const rightX = cv.w - 6;
             for (let i = 0; i < segN; i++) {
                 const sx = rightX - (i + 1) * 10 + 3;
-                const sc = i < mLit ? (i >= 9 ? COL.red : (i >= 4 ? COL.orange : COL.amber)) : COL.mapRailDim;
+                let sc = COL.mapRailDim;
+                if (i < mLit) {
+                    sc = i >= 9 ? COL.red : (i >= 4 ? COL.orange : COL.amber);
+                } else if (mChgLit > 0 && (segN - 1 - i) < mChgLit) {
+                    sc = COL.cyan;
+                }
                 cv.fillRect(sx - 1, 9, 9, 10, COL.outline);
                 cv.fillRect(sx, 10, 7, 8, sc);
             }
@@ -1864,6 +1947,8 @@ class OverlayRenderer {
                 const lbl = (absActive ? 'ABS ' : '') + valStr;
                 const bCol = (fg >= 0.36 || absActive) ? COL.red : COL.amber;
                 drawTextOutline(cv, lbl, rightX - segN * 10 - 6, 20, 16, bCol, { font: 'bold', align: 'right' });
+            } else if (mChgLit > 0 && showBrakeNum) {
+                drawTextOutline(cv, '+' + iceChargeKw.toFixed(1) + ' kW', rightX - segN * 10 - 6, 20, 15, COL.cyan, { font: 'bold', align: 'right' });
             }
         }
 
@@ -1889,6 +1974,7 @@ class OverlayRenderer {
         this.lastHudNavKey = '';
         this.lastHudRoadKey = '';
         this.lastRightWidgetKey = '';
+        this._iceChgState = {};
         this.layers = {};
     }
 }

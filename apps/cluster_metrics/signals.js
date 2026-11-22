@@ -1106,6 +1106,127 @@ function computeFrictionBrake(raw) {
     return { frictionG, frictionKw, pureRegen, brakeHold: brakeHold && frictionG <= 0.02, absActive };
 }
 
+const ICE_REASON_CODES = {
+    0: 'NONE', 1: 'DRIVER', 2: 'HVAC', 3: 'LOW_SOC',
+    4: 'COLD_ENG', 5: 'HOT_ENG', 6: 'COLD_HV', 7: 'HOT_HV',
+    8: 'SYSTEM', 9: 'COLD_AMB', 10: 'HOT_AMB', 11: 'TRAFFIC',
+    12: 'LEAD_CAR', 19: 'ON_RAMP',
+};
+
+function decodeIceStartReason(v) {
+    const raw = (v && typeof v === 'object') ? v.displaySwitchOffPreventionCombustionEngineReason : v;
+    if (raw === undefined || raw === null || raw === 255) return null;
+    if (typeof raw === 'number') {
+        if (!isFinite(raw) || raw >= 250) return null;
+        return ICE_REASON_CODES[raw] || ('CODE_' + raw);
+    }
+    const s = String(raw).trim();
+    if (/^\d+$/.test(s)) {
+        const n = Number(s);
+        if (n >= 250) return null;
+        return ICE_REASON_CODES[n] || ('CODE_' + n);
+    }
+    const u = s.toUpperCase();
+    if (/UNGUELTIG|UNBEFUELLT|INVALID/.test(u)) return null;
+    if (u === 'KEIN_ENGOFFPROHIBITOR') return 'NONE';
+    if (/BATTERIELADEZUSTAND/.test(u)) return 'LOW_SOC';
+    if (/FAHRER_ERZWUNGEN/.test(u)) return 'DRIVER';
+    if (/KOMFORTANFORDERUNG/.test(u)) return 'HVAC';
+    if (/NIEDRIGER_MOTORTEMPERATUR/.test(u)) return 'COLD_ENG';
+    if (/GERINGER_TEMPERATUR_HOCHVOLT/.test(u)) return 'COLD_HV';
+    if (/SYSTEMBEDINGT/.test(u)) return 'SYSTEM';
+    return u;
+}
+
+/**
+ * Detects when the combustion engine is actively charging the HV battery
+ * (load-point shifting / low-SoC recharge / Battery Control / stationary idle gen),
+ * strictly rejecting shore plug-in charging, braking, and off-throttle DFCO wheel regen.
+ * Supports both manual throttle and hands-free ACC cruise (where pedalPct is 0 but DME
+ * crankshaft torque is positive and fuel is burning).
+ */
+function computeIceBatteryCharge(raw, state, nowMs) {
+    const r = raw || {};
+    const st = state || {};
+    const now = typeof nowMs === 'number' && isFinite(nowMs) ? nowMs : Date.now();
+    const clear = () => {
+        st.active = false;
+        st.smoothKw = null;
+        st.smoothMs = 0;
+        st.lastValidMs = 0;
+        return { active: false, chargeKw: 0, rawKw: 0 };
+    };
+
+    if (r.plugConnected === true || r.chargingActive === true) return clear();
+    const rpm = (typeof r.rpm === 'number' && isFinite(r.rpm)) ? r.rpm : 0;
+    const engOn = typeof r.engineOn === 'boolean' ? r.engineOn : (rpm >= 450);
+    if (!engOn || rpm < 350) return clear();
+
+    // Immediate 0 ms yield whenever driver brakes or engine enters DFCO fuel cut-off
+    if (r.driverBraking === true || r.absActive === true) return clear();
+    if (typeof r.frictionG === 'number' && isFinite(r.frictionG) && r.frictionG > 0.02) return clear();
+    if (typeof r.brakeBar === 'number' && isFinite(r.brakeBar) && r.brakeBar >= 1.5) return clear();
+    if (r.isDfco === true || r.pureRegen === true) return clear();
+
+    const speedKmh = (typeof r.speedKmh === 'number' && isFinite(r.speedKmh) && r.speedKmh >= 0) ? r.speedKmh : null;
+    const torqueNm = (typeof r.torqueNm === 'number' && isFinite(r.torqueNm)) ? r.torqueNm : null;
+    const pedalPct = (typeof r.pedalPct === 'number' && isFinite(r.pedalPct)) ? r.pedalPct : null;
+    const recupPct = (typeof r.recupPct === 'number' && isFinite(r.recupPct) && r.recupPct > 0) ? r.recupPct : 0;
+    const gLong = (typeof r.gLong === 'number' && isFinite(r.gLong)) ? r.gLong : null;
+    const hvKw = (typeof r.hvKw === 'number' && isFinite(r.hvKw)) ? r.hvKw : null;
+
+    // Reject negative/zero crankshaft overrun torque when moving
+    const isMoving = speedKmh !== null && speedKmh >= 3.0;
+    if (isMoving && torqueNm !== null && torqueNm <= 4.0) return clear();
+    if (!isMoving && torqueNm !== null && torqueNm < -2.0) return clear();
+
+    // Anti-coasting-regen gate while rolling: either driver is on throttle (>= 2.5%),
+    // OR ACC is holding cruise with positive combustion torque and no decel/regen needle
+    let combustionPropelling = true;
+    if (isMoving) {
+        const onPedal = pedalPct !== null && pedalPct >= 2.5;
+        if (!onPedal) {
+            const decelOrNeedleRegen = recupPct >= 3.0 || (gLong !== null && gLong < -0.045);
+            if (decelOrNeedleRegen) {
+                combustionPropelling = false;
+            } else if (torqueNm !== null) {
+                combustionPropelling = torqueNm > 10.0;
+            } else if (pedalPct !== null) {
+                combustionPropelling = false;
+            } else {
+                combustionPropelling = gLong === null || gLong >= -0.02;
+            }
+        }
+    }
+
+    const inKw = (hvKw !== null && hvKw < 0) ? -hvKw : 0;
+    const minKw = st.active ? 0.50 : 0.85;
+    const validNow = combustionPropelling && inKw >= minKw;
+
+    if (validNow) {
+        if (typeof st.smoothKw !== 'number' || !isFinite(st.smoothKw) || !st.smoothMs || now - st.smoothMs > 8000) {
+            st.smoothKw = inKw;
+        } else {
+            const dtS = Math.max(0.05, Math.min(3.0, (now - st.smoothMs) / 1000));
+            const alpha = dtS / (0.9 + dtS);
+            st.smoothKw += (inKw - st.smoothKw) * alpha;
+        }
+        st.smoothMs = now;
+        st.lastValidMs = now;
+        st.active = true;
+        const clamped = Math.max(0.5, Math.min(30.0, st.smoothKw));
+        return { active: true, chargeKw: clamped, rawKw: inKw };
+    }
+
+    // Bridge brief (< 650 ms) ZF 8HP upshift torque/current dips while ICE stays running & unbraked
+    if (st.active && st.lastValidMs > 0 && now - st.lastValidMs <= 650 && typeof st.smoothKw === 'number') {
+        const clampedHold = Math.max(0.5, Math.min(30.0, st.smoothKw));
+        return { active: true, chargeKw: clampedHold, rawKw: inKw };
+    }
+
+    return clear();
+}
+
 class DemoGenerator {
     constructor() {
         this.t0 = Date.now();
@@ -1311,7 +1432,7 @@ class DemoGenerator {
             speedKmh = 0; rpm = 0; gear = 1; hvKw = 1.6;
             gLong = 0.0; pedalPct = 0; driverBraking = true;
         } else if (cycle >= 26 && cycle < 36) {
-            speedKmh = 98; rpm = 2350; gear = 6; hvKw = 2.1; oilTempC = 48; coolantTempC = 73; boostBar = 0.24; fuelLh = 7.4;
+            speedKmh = 98; rpm = 2350; gear = 6; hvKw = -6.2; oilTempC = 48; coolantTempC = 73; boostBar = 0.24; fuelLh = 7.4;
             gLong = 0.04; pedalPct = 28; torqueNm = 110;
         } else if (cycle >= 36 && cycle < 44) {
             speedKmh = 104; rpm = 2950; gear = 5; hvKw = 4.5; oilTempC = 94; coolantTempC = 92; boostBar = 0.58; fuelLh = 10.6;
@@ -1631,6 +1752,13 @@ class SignalHub {
                     if (rawCh >= 0 && rawCh <= 100 && this.live.someipSocPct === undefined) {
                         this.live.someipSocPct = rawCh;
                     }
+                    markReal();
+                }
+            },
+            statusOperatingModeHybrid: (v) => {
+                const rawOp = v && typeof v === 'object' ? v.displayOperatingModeDriveHybrid : v;
+                if (typeof rawOp === 'number' && isFinite(rawOp) && rawOp >= 0 && rawOp < 4095) {
+                    this.live.opModeHybrid = rawOp;
                     markReal();
                 }
             },
@@ -2035,12 +2163,15 @@ class SignalHub {
         const clMode = s.cornerLeftDisplay || 'oil_cool';
         const smartAlerts = s.smartAlerts !== false;
         const veh = s.vehicle || 'auto';
+        const wantIceReason = (enabled && veh !== 'ice' && s.iceChargeBar !== false &&
+            ((wantCluster && (s.brakeIndicator || 'bar_num') !== 'off') || (wantHud && anyHudBrake))) || forceAll;
 
         this._demand = {
             gapAhead: wantGapAhead,
             climate: wantClimate,
             media: wantMedia,
             nav: wantNav,
+            effReason: wantIceReason,
             brakeUds: (enabled && ((wantCluster && (s.brakeIndicator || 'bar_num') !== 'off') || (wantHud && anyHudBrake))) || forceAll,
             hvUds: (enabled && veh !== 'ice') || forceAll,
             v12Uds: (enabled && (smartAlerts || (wantPanel && s.widgetTrip !== false) || (wantCluster && (crMode === 'auto' || crMode === 'v12')))) || forceAll,
@@ -2051,6 +2182,16 @@ class SignalHub {
         if (!this._started || this.stopped) return this._demand;
 
         const markReal = () => { this.lastRealSignalT = Date.now(); };
+
+        this._setDynSub('effReason', wantIceReason, 'de.bmw.infotainment.drivingexcitement.Efficiencytainment', '1', {
+            statusReasonPowerUpCombustionEngine: (v) => {
+                const r = decodeIceStartReason(v);
+                if (r !== null) {
+                    this.live.iceStartReason = r;
+                    markReal();
+                }
+            },
+        }, () => { this.live.iceStartReason = undefined; });
 
         this._setDynSub('gapAhead', wantGapAhead, 'de.bmw.dass.GapVehicleAhead', '1', {
             GapVehicleDrivingAhead: (v) => {
@@ -2142,6 +2283,7 @@ class SignalHub {
             gapAhead: Boolean(this._dynSubs.gapAhead),
             climate: Boolean(this._dynSubs.climate),
             climateMaster: Boolean(this._dynSubs.climateMaster),
+            effReason: Boolean(this._dynSubs.effReason),
             media: this._mediaActive,
             nav: this._navActive,
             brakeUds: Boolean(this._demand.brakeUds),
@@ -2234,6 +2376,8 @@ class SignalHub {
                     pedalPct: this.live.pedalPct !== undefined ? Number(this.live.pedalPct.toFixed(1)) : null,
                     hvKw: this.live.udsKw !== undefined ? Number(this.live.udsKw.toFixed(1)) : null,
                     recupPct: this.live.recupNeedlePct !== undefined ? this.live.recupNeedlePct : null,
+                    opModeHyb: this.live.opModeHybrid !== undefined ? this.live.opModeHybrid : null,
+                    iceReason: this.live.iceStartReason || null,
                     brkSw: this.live.driverBraking !== undefined ? this.live.driverBraking : null,
                     rawBrk: this.live.rawBraking,
                     dscPump: this.live.dscPumpState,
@@ -2410,7 +2554,7 @@ class SignalHub {
         this.ipc.battery = batt;
         this.ipc.brakeBar = brakeBar;
         this.ipc.t = found.length ? now : 0;
-        if (typeof kw === 'number' && isFinite(kw)) this.fastKw.reading(kw, now);
+        if (typeof kw === 'number' && isFinite(kw) && (this.live.rpm || 0) < 350) this.fastKw.reading(kw, now);
     }
 
     async _startUds() {
@@ -2517,8 +2661,8 @@ class SignalHub {
                 const now = Date.now();
                 this.live.udsKw = kw;
                 this.live.udsKwT = now;
-                // Only train eDRIVE needle interpolator while actually moving (never while parked/charging)
-                if (this.live.stage !== 'P' && typeof this.live.speedKmh === 'number' && this.live.speedKmh >= 1.5) {
+                // Only train eDRIVE needle interpolator while pure-EV moving (never parked/charging or during ICE load-point charging)
+                if (this.live.stage !== 'P' && typeof this.live.speedKmh === 'number' && this.live.speedKmh >= 1.5 && (this.live.rpm || 0) < 350) {
                     this.fastKw.reading(kw, now);
                 }
                 this.uds.smeAnswered = true;
@@ -2852,7 +2996,7 @@ class SignalHub {
         const l = this.live;
         const ipcFresh = this.ipc.active;
         const speedKmh = l.speedKmh !== undefined ? l.speedKmh : null;
-        const isMovingForFastKw = l.stage !== 'P' && speedKmh !== null && speedKmh >= 1.5;
+        const isMovingForFastKw = l.stage !== 'P' && speedKmh !== null && speedKmh >= 1.5 && (l.rpm || 0) < 350;
         const fastKwVal = isMovingForFastKw ? this.fastKw.now(now) : null;
         const hvKw = (ipcFresh && typeof this.ipc.kw === 'number') ? this.ipc.kw
             : (fastKwVal !== null ? fastKwVal
@@ -2949,6 +3093,9 @@ class SignalHub {
             pureRegen: fb.pureRegen,
             brakeHold: fb.brakeHold,
             absActive: fb.absActive,
+            recupPct,
+            opModeHybrid: l.opModeHybrid !== undefined ? l.opModeHybrid : null,
+            iceStartReason: l.iceStartReason || null,
             hudNav,
             navRouteActive,
             navHasLanes,
@@ -3014,6 +3161,7 @@ module.exports = {
     decodeStatusBattery2, decodeCabinTemp,
     createHvacState, feedHvacClimate2, feedHvacClimateMaster, resolveHvacMode,
     calcCarClockOffsetMin, calcFullLocalDateOffsetMin, calcAutoTimeOffsetMin, calcKombiShowTimeOffsetMin, parseHmiTimeZoneOffsetMin,
-    computeFrictionBrake, computeChargingState, decodeDscPressure, decodeDscPedal, decodeDscRegen, bcToL100,
+    computeFrictionBrake, computeChargingState, computeIceBatteryCharge, decodeIceStartReason,
+    decodeDscPressure, decodeDscPedal, decodeDscRegen, bcToL100,
     flagActive, gearOf, stageOf, selectionOf, programOf, driveModeOf,
 };
