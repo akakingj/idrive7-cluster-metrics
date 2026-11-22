@@ -18,8 +18,8 @@ class EfficiencyTracker {
         const o = opts || {};
         this.evTauKm = o.evTauKm || 5.0;
         this.evInstTauKm = o.evInstTauKm || 0.25;
-        this.fuelTauKm = o.fuelTauKm || 5.0;
-        this.fuelInstTauKm = o.fuelInstTauKm || 0.30;
+        this.fuelTauKm = o.fuelTauKm || 0.24;
+        this.fuelInstTauKm = o.fuelInstTauKm || 0.20;
         this.reset();
     }
 
@@ -39,39 +39,70 @@ class EfficiencyTracker {
         this.fuelInstDistWeight = 0;
         this.fuelInstLWeight = 0;
 
-        // CDS2 injection volume integrator + auto-calibrator against DME L/h
+        // CDS2 16-bit injection volume counter integrator + auto-calibrator against DME L/h
         this.lastInjRaw = null;
-        this.lastInjT = 0;
+        this.lastInjChangeT = 0;
+        this.injAccCounts = 0;
+        this.injAccDtS = 0;
         this.injFlowUlPerSec = null;
+        this.injRateT = 0;
         this.ulPerCount = 1.0;
+        this.injCalibrated = false;
 
         this.lastBcL100 = null;
         this.isDfco = false;
     }
 
     _updateInjectionFlow(injRaw, nowMs, dmeFuelLh, rpm) {
-        if (typeof injRaw === 'number' && isFinite(injRaw)) {
-            if (this.lastInjRaw !== null && this.lastInjT > 0) {
-                const dtS = (nowMs - this.lastInjT) / 1000;
-                if (dtS >= 0.05 && dtS <= 5.0) {
-                    const delta = injRaw - this.lastInjRaw;
-                    if (delta >= 0 && delta < 500000) {
-                        const rawRate = delta / dtS;
-                        this.injFlowUlPerSec = this.injFlowUlPerSec === null
-                            ? rawRate
-                            : this.injFlowUlPerSec * 0.65 + rawRate * 0.35;
+        if (typeof injRaw === 'number' && isFinite(injRaw) && injRaw >= 0 && injRaw < 65535) {
+            if (this.lastInjRaw !== null && this.lastInjChangeT > 0) {
+                const dtS = (nowMs - this.lastInjChangeT) / 1000;
+                if (dtS > 5.0) {
+                    this.injAccCounts = 0;
+                    this.injAccDtS = 0;
+                    this.lastInjRaw = injRaw;
+                    this.lastInjChangeT = nowMs;
+                } else if (injRaw !== this.lastInjRaw && dtS >= 0.02) {
+                    // UInt16 counter wraps modulo 65536; ignore implausible jumps > 40000
+                    const delta = (injRaw >= this.lastInjRaw)
+                        ? (injRaw - this.lastInjRaw)
+                        : ((injRaw - this.lastInjRaw + 65536) % 65536);
+                    if (delta > 0 && delta < 40000) {
+                        this.injAccCounts += delta;
+                        this.injAccDtS += dtS;
+                        if (this.injAccDtS >= 0.25) {
+                            const rawRate = this.injAccCounts / this.injAccDtS;
+                            this.injFlowUlPerSec = this.injFlowUlPerSec === null
+                                ? rawRate
+                                : this.injFlowUlPerSec * 0.55 + rawRate * 0.45;
+                            this.injRateT = nowMs;
+                            this.injAccCounts = 0;
+                            this.injAccDtS = 0;
+                        }
                     }
+                    this.lastInjRaw = injRaw;
+                    this.lastInjChangeT = nowMs;
+                } else if (dtS >= 1.2 && injRaw === this.lastInjRaw) {
+                    // Counter stopped advancing (DFCO coasting or engine off)
+                    this.injFlowUlPerSec = 0;
+                    this.injRateT = nowMs;
+                    this.injAccCounts = 0;
+                    this.injAccDtS = 0;
+                    this.lastInjChangeT = nowMs;
                 }
+            } else {
+                this.lastInjRaw = injRaw;
+                this.lastInjChangeT = nowMs;
             }
-            this.lastInjRaw = injRaw;
-            this.lastInjT = nowMs;
         }
-        // Calibrate uL-per-count smoothly when DME UDS fuelRate (L/h) is available
-        if (typeof dmeFuelLh === 'number' && isFinite(dmeFuelLh) && dmeFuelLh > 0.4 &&
-            this.injFlowUlPerSec !== null && this.injFlowUlPerSec > 20 && rpm > 500) {
+        // Calibrate uL-per-count smoothly when DME UDS fuelRate (L/h) is available alongside live counter rate
+        if (typeof dmeFuelLh === 'number' && isFinite(dmeFuelLh) && dmeFuelLh > 0.3 &&
+            this.injFlowUlPerSec !== null && this.injFlowUlPerSec > 5 &&
+            (nowMs - this.injRateT) <= 2000 && rpm > 500) {
             const targetUlPerSec = (dmeFuelLh * 1e6) / 3600;
-            const estFactor = clamp(targetUlPerSec / this.injFlowUlPerSec, 0.05, 25.0);
-            this.ulPerCount = this.ulPerCount * 0.8 + estFactor * 0.2;
+            const estFactor = clamp(targetUlPerSec / this.injFlowUlPerSec, 0.02, 50.0);
+            this.ulPerCount = this.injCalibrated ? (this.ulPerCount * 0.75 + estFactor * 0.25) : estFactor;
+            this.injCalibrated = true;
         }
     }
 
@@ -96,13 +127,17 @@ class EfficiencyTracker {
 
         this._updateInjectionFlow(s.injVolumeRaw, t, dmeFuelLh, rpm);
 
-        // Determine instantaneous fuel flow (L/h)
+        // Determine instantaneous fuel flow (L/h): prefer fast SOME/IP injection counter once calibrated
+        // against DME UDS fuelRate so throttle changes and DFCO respond immediately between 1s UDS reads.
         let lPerHour = null;
+        const injFresh = this.injFlowUlPerSec !== null && (t - this.injRateT) <= 1800;
         if (!engineOn || rpm < 250) {
             lPerHour = 0;
+        } else if (this.injCalibrated && injFresh) {
+            lPerHour = Math.max(0, (this.injFlowUlPerSec * this.ulPerCount * 3600) / 1e6);
         } else if (dmeFuelLh !== null) {
             lPerHour = Math.max(0, dmeFuelLh);
-        } else if (this.injFlowUlPerSec !== null) {
+        } else if (injFresh) {
             lPerHour = Math.max(0, (this.injFlowUlPerSec * this.ulPerCount * 3600) / 1e6);
         } else if (this.lastBcL100 !== null && speedKmh > 3) {
             lPerHour = (this.lastBcL100 * speedKmh) / 100;

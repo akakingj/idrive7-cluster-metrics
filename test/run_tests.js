@@ -1517,7 +1517,7 @@ function inBox(x, y, box) {
         assert.strictEqual(mSnap.active, true);
         assert.strictEqual(mSnap.title, '691. Is This What a Healthy Economy Looks Like?');
         assert.strictEqual(mSnap.artist, 'Freakonomics Radio');
-        assert(mSnap.cover && mSnap.cover.w === 144);
+        assert(mSnap.cover && mSnap.cover.w === 176);
         assert.strictEqual(mSnap.page, 'media');
 
         // Verify long title shrinks to 22px min and paginates smoothly over time (never truncating permanently)
@@ -1665,18 +1665,18 @@ function inBox(x, y, box) {
             },
         };
         r.render(model, { enabled: true, widgetMedia: true, widgetTrip: true }, 4100);
-        assert.strictEqual(r.layers.right_widget.rect.x, 1252, 'right_widget shifted right to x=1252 (foreground cx=1438)');
+        assert.strictEqual(r.layers.right_widget.rect.x, 1244, 'right_widget shifted to x=1244 (cover top-left at world 1376,164)');
         let titleGlyphPixels = 0;
         let artistGlyphPixels = 0;
         const rwCv = r.layers.right_widget.cv;
-        for (let y = 260; y <= 292; y++) {
-            for (let x = 90; x <= 282; x++) {
+        for (let y = 286; y <= 324; y++) {
+            for (let x = 90; x <= 340; x++) {
                 const o = (y * rwCv.w + x) * 4;
                 if (rwCv.d[o] > 210 && rwCv.d[o + 1] > 210 && rwCv.d[o + 2] > 210 && rwCv.d[o + 3] > 200) titleGlyphPixels++;
             }
         }
-        for (let y = 298; y <= 328; y++) {
-            for (let x = 90; x <= 282; x++) {
+        for (let y = 332; y <= 368; y++) {
+            for (let x = 90; x <= 340; x++) {
                 const o = (y * rwCv.w + x) * 4;
                 if (rwCv.d[o] > 165 && rwCv.d[o + 1] > 170 && rwCv.d[o + 3] > 200) artistGlyphPixels++;
             }
@@ -2230,15 +2230,19 @@ function inBox(x, y, box) {
         assert(greenPx > 120, 'Exit badge must paint green body');
         assert(whitePx > 200, 'US shield + road text must paint bright white pixels');
 
-        // F. Calibrated G30 right-wing backdrop covers top-left eyebrow handle (1265, 104),
-        //    stays strictly inside outer bezel at (1765, 355), and clears bottom-left map at (1400, 600).
-        const cov = { w: 144, h: 144, d: Buffer.alloc(144 * 144 * 4, 220) };
-        const bg = buildStockBackdrop(cov, 536, 536, { ox: 1252, oy: 88, vx: 196, vy: 218 });
-        const alphaAt = (wx, wy) => bg[((wy - 88) * 536 + (wx - 1252)) * 4 + 3];
-        assert(alphaAt(1275, 105) > 20, 'backdrop must reach top-left extended eyebrow handle at (1275, 105)');
-        assert.strictEqual(alphaAt(1765, 355), 0, 'backdrop must NOT spill past outer-right bezel at (1765, 355)');
+        // F. Homography-calibrated G30 right-wing backdrop covers pointed top-left eyebrow tip (1248, 96),
+        //    trims top-right bezel purple zone (1560, 122), fills mid-right cyan bezel (1755, 355),
+        //    and trims bottom '100 %' / 'Power %' strip (1560, 610 === 0 while 1560, 592 > 20).
+        const cov = { w: 176, h: 176, d: Buffer.alloc(176 * 176 * 4, 220) };
+        const bg = buildStockBackdrop(cov, 536, 520, { ox: 1244, oy: 88, vx: 220, vy: 252 });
+        const alphaAt = (wx, wy) => bg[((wy - 88) * 536 + (wx - 1244)) * 4 + 3];
+        assert(alphaAt(1248, 96) > 20, 'backdrop must fill pointed top-left eyebrow tip at (1248, 96)');
+        assert.strictEqual(alphaAt(1560, 122), 0, 'backdrop must NOT exceed top-right bezel at (1560, 122)');
+        assert(alphaAt(1755, 355) > 20, 'backdrop must fill mid-right bezel curve at (1755, 355)');
+        assert.strictEqual(alphaAt(1768, 355), 0, 'backdrop must NOT spill past outer-right bezel at (1768, 355)');
         assert.strictEqual(alphaAt(1400, 600), 0, 'backdrop must NOT spill onto bottom-left map at (1400, 600)');
-        assert(alphaAt(1560, 610) > 20, 'backdrop must reach bottom-right gauge curve at (1560, 610)');
+        assert(alphaAt(1560, 592) > 20, 'backdrop must reach bottom-right gauge curve at (1560, 592)');
+        assert.strictEqual(alphaAt(1560, 606), 0, 'backdrop must stop cleanly above Power % / 100% strip at y>=604');
     });
 
     /* 22. v0.8.6: Two-Level Stacked HUD Lane Guidance & Promotion Slide-Down Animation */
@@ -2493,6 +2497,83 @@ function inBox(x, y, box) {
             const atlas = bakeSizeAtlas(parsedRg, 36, '19:39 Tire Pressure Low', 0.016);
             assert(atlas.atlasW > 64 && atlas.glyphs[57] && atlas.glyphs[57][2] > 10, 'BMWTARG.ttf must rasterize crisp glyphs');
         }
+    });
+
+    /* 24. DME 0x5656 SGBD fuel factor, 16-bit injection counter wraparound, '/' slant bar & white HUD gas mode */
+    await test('DME 0x5656 SGBD fuel factor (0.00429153), 16-bit injection wrap, "/" slant bar & white HUD gas mode', () => {
+        const appSpec = JSON.parse(fs.readFileSync(path.join(APP_DIR, 'app.json'), 'utf8'));
+        const did5656 = appSpec.config.dids.dme.fuelRate.find((c) => c.did === '5656');
+        assert(did5656 && Math.abs(did5656.factor - 0.00429153) < 1e-6,
+            'DME DID 5656 must use SGBD factor 0.00119209 * 3.6 = 0.00429153 L/h (never 2.33x inflated 0.01)');
+
+        const { bcToL100 } = require(path.join(APP_DIR, 'signals'));
+        assert(Math.abs(bcToL100(35.0, 3) - (235.214583 / 35.0)) < 0.01, 'bcToL100 must decode numeric enum 3 as MPG_US');
+        assert(Math.abs(bcToL100(42.0, 2) - (282.480936 / 42.0)) < 0.01, 'bcToL100 must decode numeric enum 2 as MPG_UK');
+        assert.strictEqual(bcToL100(35.0, 7), null, 'bcToL100 must reject SIGNAL_UNGUELTIG = 7');
+
+        // 16-bit statusInjectionVolume wraparound (65400 -> 136 = +272 counts over 0.5s = 544 counts/s)
+        // must calibrate cleanly against DME L/h and NOT decay toward 0 on unchanged 100ms render ticks!
+        const et = new EfficiencyTracker();
+        et.update({ speedKmh: 64.37, rpm: 1800, engineOn: true, dmeFuelLh: 4.30, injVolumeRaw: 65400 }, 1000);
+        et.update({ speedKmh: 64.37, rpm: 1800, engineOn: true, dmeFuelLh: 4.30, injVolumeRaw: 65400 }, 1100);
+        et.update({ speedKmh: 64.37, rpm: 1800, engineOn: true, dmeFuelLh: 4.30, injVolumeRaw: 136 }, 1500);
+        const rWrap = et.update({ speedKmh: 64.37, rpm: 1800, engineOn: true, dmeFuelLh: 4.30, injVolumeRaw: 136 }, 1600);
+        assert(et.injCalibrated && Math.abs(rWrap.lPerHour - 4.30) < 0.15,
+            'calibrated 16-bit wrapped injection counter must match 4.30 L/h (~35 MPG at 40 mph), got ' + rWrap.lPerHour);
+
+        // Verify '/' forward-slash media progress bar (top row extends further right than bottom row) & white HUD gas mode
+        const r = new OverlayRenderer({ allowPanel: true });
+        const cov176 = { w: 176, h: 176, d: Buffer.alloc(176 * 176 * 4, 180) };
+        r.render({
+            units: unitsMod.US_PRESET,
+            profile: { vehicleType: 'phev', engineOn: true, mode: 'gas_cold', isEv: false, isCold: true, coldCeilingRpm: 3800, alert: null },
+            efficiency: { evKmPerKwh: 5.5, fuelLPer100km: 6.72, isDfco: false },
+            telemetry: {
+                speedKmh: 72, rpm: 1850, boostBar: 0.35, soc: 14, soc12: 88, oilTempC: 58, coolantTempC: 65,
+                stage: 'D', program: 'D', gear: 6, frictionG: 0,
+                media: {
+                    active: true, playing: true, title: '季節は次々死んでいく', artist: 'amazarashi',
+                    cover: cov176, coverRev: 1, totalSec: 240, elapsedSec: 120, remainSec: 120, frac: 0.5, bcStep: 0,
+                },
+            },
+        }, { enabled: true, widgetMedia: true }, 5000);
+
+        assert.strictEqual(r.lastSummary.heroCol, '#f2f5fa', 'Gas mode MPG hero value must be white (never blue)');
+        assert.strictEqual(r.lastSummary.heroUnitCol, '#f2f5fa', 'Gas mode MPG unit must be white (never blue)');
+        assert.strictEqual(r.lastSummary.subCol, '#f2f5fa', 'Gas mode Line 2 must be white (never blue)');
+        assert.strictEqual(r.lastSummary.subText, '1850 / 3800 RPM', 'Cold gas mode must show Live RPM / Cold Rev Ceiling');
+
+        // Warm gas mode switches Line 2 to Live RPM + Turbo Boost Pressure in white
+        r.render({
+            units: unitsMod.US_PRESET,
+            profile: { vehicleType: 'phev', engineOn: true, mode: 'gas_warm', isEv: false, isCold: false, coldCeilingRpm: null, alert: null },
+            efficiency: { evKmPerKwh: 5.5, fuelLPer100km: 6.72, isDfco: false },
+            telemetry: {
+                speedKmh: 88, rpm: 2143, boostBar: 0.35, soc: 14, soc12: 88, oilTempC: 92, coolantTempC: 89,
+                stage: 'D', program: 'D', gear: 7, frictionG: 0,
+                media: {
+                    active: true, playing: true, title: '季節は次々死んでいく', artist: 'amazarashi',
+                    cover: cov176, coverRev: 1, totalSec: 240, elapsedSec: 120, remainSec: 120, frac: 0.5, bcStep: 0,
+                },
+            },
+        }, { enabled: true, widgetMedia: true }, 5200);
+        assert.strictEqual(r.lastSummary.subText, '2140 RPM  +5.1 PSI', 'Warm gas mode must show Live RPM + Turbo Boost PSI');
+        assert.strictEqual(r.lastSummary.subCol, '#f2f5fa', 'Warm gas mode Line 2 must stay white');
+
+        // Check '/' forward-slash right end of cyan progress fill bar at barY=418 (top row y=418 vs bottom row y=429)
+        const rw = r.layers.right_widget.cv;
+        const maxCyanX = (py) => {
+            let mx = -1;
+            for (let x = 52; x < 395; x++) {
+                const o = (py * rw.w + x) * 4;
+                if (rw.d[o + 1] > 190 && rw.d[o + 2] > 235 && rw.d[o + 3] === 255) mx = x;
+            }
+            return mx;
+        };
+        const topBarRight = maxCyanX(418);
+        const botBarRight = maxCyanX(429);
+        assert(topBarRight > botBarRight + 8,
+            'Media progress bar must slant "/" (top-right > bottom-right), got top=' + topBarRight + ' vs bot=' + botBarRight);
     });
 
     console.log('\nAll ' + passed + ' tests passed.');

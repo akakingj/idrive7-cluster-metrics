@@ -228,7 +228,7 @@ function shrinkSquare(rgba, sw, sh, side) {
 function decodeCoverThumb(buf, side) {
     const img = decodeImage(buf);
     if (!img) return null;
-    return shrinkSquare(img.rgba, img.w, img.h, side || 144);
+    return shrinkSquare(img.rgba, img.w, img.h, side || 176);
 }
 
 function smoothstep(e0, e1, x) {
@@ -247,39 +247,44 @@ function pwl(pts, x) {
     return last[1];
 }
 
-// Calibrated 1920x720 G30 right-wing Power % gauge face (measured directly from real 530e KOMBI4 photo):
-// Includes top-left extended eyebrow handle (x=1254..1384, y=95..124), hugs the inner cyan bezel
-// along 60/40/20/0 and the lower CHARGE arc down to Power % (y=622), with zero bleed onto the center map.
+// Homography-calibrated 1920x720 G30 right-wing Power % gauge face (measured directly from real 530e KOMBI4 photo):
+// Fills the pointed top-left eyebrow handle (x=1245..1356, y=89..122), smooth inner-left boomerang curve,
+// trims the top-right curve strictly inside the cyan bezel, hugs the outer-right cyan glow out to x=1762,
+// and stops cleanly at y=601 above the bottom '100 %' / 'Power %' row.
 const WING_TOP_Y = [
-    [1254, 95], [1340, 98], [1420, 102], [1500, 108], [1554, 114],
-    [1592, 134], [1634, 170], [1694, 232], [1748, 325],
+    [1245, 89], [1295, 92], [1350, 97], [1390, 102], [1430, 108],
+    [1470, 114], [1508, 121], [1545, 132], [1585, 149], [1625, 175],
+    [1665, 208], [1696, 240], [1740, 296], [1762, 355],
 ];
 const WING_OUTER_X = [
-    [95, 1554], [114, 1564], [134, 1592], [160, 1624], [200, 1664], [240, 1698],
-    [280, 1726], [320, 1744], [352, 1750], [378, 1742], [405, 1732], [440, 1718],
-    [480, 1698], [520, 1676], [560, 1648], [595, 1618], [622, 1588],
+    [89, 1390], [102, 1390], [114, 1470], [121, 1508], [132, 1545],
+    [149, 1585], [175, 1625], [208, 1665], [240, 1696], [275, 1726],
+    [305, 1748], [335, 1760], [360, 1762], [385, 1757], [410, 1746],
+    [445, 1727], [485, 1704], [525, 1681], [560, 1656], [585, 1633],
+    [601, 1610],
 ];
 const WING_INNER_X = [
-    [95, 1254], [112, 1258], [120, 1352], [128, 1384], [160, 1408], [200, 1435],
-    [245, 1465], [295, 1492], [340, 1508], [368, 1508], [410, 1496], [460, 1478],
-    [520, 1456], [580, 1438], [622, 1428],
+    [89, 1245], [104, 1249], [117, 1255], [122, 1356], [136, 1372],
+    [164, 1392], [205, 1417], [250, 1444], [295, 1471], [335, 1496],
+    [360, 1505], [380, 1504], [415, 1493], [460, 1476], [520, 1455],
+    [575, 1437], [601, 1430],
 ];
-const WING_BOTTOM_Y = 622;
+const WING_BOTTOM_Y = 601;
 
 /**
  * Full-wing gauge-edge translucent album-art backdrop matching BMW's stock Media widget:
  *   - 1-pass smoothed zoomed artwork extends cleanly to the top, outer-right & bottom gauge edges
  *     at uniform opacity (zero darkened border or outer circular falloff).
- *   - Softly tapers along the inner grey boomerang seam toward the navigation map.
+ *   - Crisp 3px AA cut along the inner boomerang seam and pointed top-left eyebrow tip.
  *   - Compact local dark shadow only directly behind foreground cover & text for crisp readability.
  */
 function buildStockBackdrop(cover, cw, ch, opts) {
     if (!cover || !cover.d || !cover.w || !cover.h) return null;
     const o = opts || {};
-    const ox = typeof o.ox === 'number' ? o.ox : 1252;
+    const ox = typeof o.ox === 'number' ? o.ox : 1244;
     const oy = typeof o.oy === 'number' ? o.oy : 88;
-    const vx = typeof o.vx === 'number' ? o.vx : 186; // foreground cover & text local center (world 1438)
-    const vy = typeof o.vy === 'number' ? o.vy : 224; // foreground local vertical center
+    const vx = typeof o.vx === 'number' ? o.vx : 220; // foreground cover & text local center (world 1464)
+    const vy = typeof o.vy === 'number' ? o.vy : 252; // foreground local vertical center
     const cacheKey = [cw, ch, ox, oy, vx, vy].join(':');
     if (cover._backdrop && cover._backdropKey === cacheKey) return cover._backdrop;
 
@@ -315,29 +320,28 @@ function buildStockBackdrop(cover, cw, ch, opts) {
     }
 
     const out = Buffer.alloc(cw * ch * 4);
-    // Span zoomed artwork generously over the whole Power % gauge face centered at world (1560, 346)
-    const artW = 514;
-    const artH = 514;
-    const artX0World = 1560 - Math.round(artW / 2);
-    const artY0World = 346 - Math.round(artH / 2);
+    // Span zoomed artwork generously over the whole Power % gauge face centered at world (1552, 344)
+    const artW = 524;
+    const artH = 524;
+    const artX0World = 1552 - Math.round(artW / 2);
+    const artY0World = 344 - Math.round(artH / 2);
     const srcSpanX = (s - 1) / artW;
     const srcSpanY = (sh - 1) / artH;
     const peakArtAlpha = 98;
-    const rxVig = 112;
-    const ryVig = 132;
+    const rxVig = 124;
+    const ryVig = 148;
 
     for (let y = 0; y < ch; y++) {
         const wy = oy + y;
         const rowOut = y * cw;
         const vdy = (y - vy) / ryVig;
 
-        const inYBand = wy >= 94 && wy <= WING_BOTTOM_Y;
+        const inYBand = wy >= 89 && wy <= WING_BOTTOM_Y;
         const botAa = inYBand ? smoothstep(WING_BOTTOM_Y, WING_BOTTOM_Y - 3, wy) : 0;
         const innerX = inYBand ? pwl(WING_INNER_X, wy) : 9999;
         const outerX = inYBand ? pwl(WING_OUTER_X, wy) : -1;
-        // Soft left fade only on the top-left eyebrow handle tip (y <= 116); crisp 3px AA cut along the boomerang
-        const innerFadeLo = wy <= 116 ? innerX : innerX - 2;
-        const innerFadeHi = wy <= 116 ? innerX + 14 : innerX + 2;
+        const innerFadeLo = innerX - 1.5;
+        const innerFadeHi = innerX + 2.0;
 
         for (let x = 0; x < cw; x++) {
             const wx = ox + x;

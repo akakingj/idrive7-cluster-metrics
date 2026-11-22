@@ -2,7 +2,7 @@
   "id": "cluster_metrics",
   "title": "Cluster Metrics",
   "description": "Real-time efficiency, HV battery %, powertrain temperatures, gear in D, full-wing Right-Wing Media/Charging/Trip/TPMS & Alerts widget, HUD turn-by-turn nav, and live DSC hydraulic brake indicator for BMW iDrive 7",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "autostart": true,
   "license": "GPL-3.0-only",
   "vendor": "chyiz",
@@ -1199,7 +1199,7 @@
             "did": "5656",
             "bytes": 2,
             "at": 0,
-            "factor": 0.01,
+            "factor": 0.00429153,
             "min": 0,
             "max": 150,
             "timeoutMs": 900
@@ -1209,6 +1209,15 @@
             "bytes": 2,
             "at": 0,
             "factor": 0.05,
+            "min": 0,
+            "max": 150,
+            "timeoutMs": 900
+          },
+          {
+            "did": "4521",
+            "bytes": 2,
+            "at": 0,
+            "factor": 0.134228,
             "min": 0,
             "max": 150,
             "timeoutMs": 900

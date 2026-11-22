@@ -949,13 +949,18 @@ function computeChargingState(raw, ctx, nowMs) {
     };
 }
 
-function bcToL100(rawVal, unitStr) {
+function bcToL100(rawVal, unitVal) {
     if (typeof rawVal !== 'number' || !isFinite(rawVal) || rawVal <= 0 || rawVal >= 6553) return null;
-    const u = String(unitStr || '').toUpperCase();
-    if (/MPG_?US/.test(u)) return 235.214583 / rawVal;
-    if (/MPG_?UK/.test(u)) return 282.480936 / rawVal;
-    if (/KM_?S?_?L/.test(u)) return 100 / rawVal;
-    return rawVal; // VERBRAUCH_IN_L_S_100KM
+    if (unitVal === 7) return null; // SIGNAL_UNGUELTIG
+    if (unitVal === 3) return 235.214583 / rawVal; // VERBRAUCH_IN_MPG_US
+    if (unitVal === 2) return 282.480936 / rawVal; // VERBRAUCH_IN_MPG_UK
+    if (unitVal === 4) return 100 / rawVal;        // VERBRAUCH_IN_KM_S_L
+    const u = String(unitVal || '').toUpperCase();
+    if (/UNGUELTIG|UNBEFUELLT|INVALID/.test(u)) return null;
+    if (/MPG_?_?US/.test(u)) return 235.214583 / rawVal;
+    if (/MPG_?_?UK/.test(u)) return 282.480936 / rawVal;
+    if (/KM_?_?S_?_?L/.test(u)) return 100 / rawVal;
+    return rawVal; // VERBRAUCH_IN_L_S_100KM (1)
 }
 
 /**
@@ -1521,8 +1526,10 @@ class SignalHub {
             },
             statusInjectionVolume: (v) => {
                 if (!v || typeof v !== 'object') return;
-                if (typeof v.injectionVolumeFuelEngine === 'number' && isFinite(v.injectionVolumeFuelEngine)) {
+                if (typeof v.injectionVolumeFuelEngine === 'number' && isFinite(v.injectionVolumeFuelEngine) &&
+                    v.injectionVolumeFuelEngine >= 0 && v.injectionVolumeFuelEngine < 65535) {
                     this.live.injVolumeRaw = v.injectionVolumeFuelEngine;
+                    this.live.injVolumeT = Date.now();
                     markReal();
                 }
                 const oil2 = sc('temp', v.oilTemperature);
@@ -2726,7 +2733,9 @@ class SignalHub {
         }, 420);
         this.timers.push(fastTimer);
 
-        // Slow round-robin UDS loop for SoC %, CellTemp, DME fuelRate, 12V battery, IAT, Gearbox oil
+        // Slow round-robin UDS loop for SoC %, CellTemp, DME fuelRate (throttled to 10s once SOME/IP injection counter calibrates!), 12V, IAT, Gearbox oil
+        let dmeWasRunning = false;
+        let dmeFuelCalibReads = 0;
         const slowTimer = setInterval(async () => {
             if (this.stopped || slowBusy || !isEnabled() || this.isDemoActive() || this.live.carLocked) return;
             slowBusy = true;
@@ -2735,15 +2744,34 @@ class SignalHub {
                 if (this._demand.hvUds && !(this.ipc.active && typeof this.ipc.soc === 'number') && !checkSmeSilence()) {
                     await readSmeSocAndTemp();
                 }
-                if ((this.live.rpm || 0) >= 350 && !link.silent(dmeCfg.ecu || 18)) {
-                    await exclusive(async () => {
-                        const frVal = await this.readers.dme.value('fuelRate', dmeCfg.fuelRate || []);
-                        if (typeof frVal === 'number') this.live.dmeFuelLh = frVal;
-                        if (this.live.oilTempC === undefined) {
-                            const oilVal = await this.readers.dme.value('oil', dmeCfg.oil || []);
-                            if (typeof oilVal === 'number') this.live.oilTempC = oilVal;
+                const rpmNow = this.live.rpm || 0;
+                if (rpmNow < 250) {
+                    dmeWasRunning = false;
+                    if (this.live.dmeFuelLh !== undefined) this.live.dmeFuelLh = 0;
+                } else if (rpmNow >= 350) {
+                    if (!dmeWasRunning) {
+                        dmeWasRunning = true;
+                        if (link.silent(dmeCfg.ecu || 18) && typeof link.wake === 'function') {
+                            link.wake(dmeCfg.ecu || 18);
                         }
-                    }, false);
+                    }
+                    const injLive = this.live.injVolumeT && (Date.now() - this.live.injVolumeT) < 3000;
+                    const wantFuelUds = !injLive || dmeFuelCalibReads < 5 || (slowTick % 4 === 0);
+                    if (!link.silent(dmeCfg.ecu || 18) && (wantFuelUds || this.live.oilTempC === undefined)) {
+                        await exclusive(async () => {
+                            if (wantFuelUds) {
+                                const frVal = await this.readers.dme.value('fuelRate', dmeCfg.fuelRate || []);
+                                if (typeof frVal === 'number') {
+                                    this.live.dmeFuelLh = frVal;
+                                    if (frVal > 0.3 && injLive) dmeFuelCalibReads++;
+                                }
+                            }
+                            if (this.live.oilTempC === undefined) {
+                                const oilVal = await this.readers.dme.value('oil', dmeCfg.oil || []);
+                                if (typeof oilVal === 'number') this.live.oilTempC = oilVal;
+                            }
+                        }, false);
+                    }
                 }
                 if (this._demand.v12Uds && slowTick % 8 === 1) {
                     if (link.silent(dmeCfg.ecu || 18) && slowTick % 24 === 1 && typeof link.wake === 'function') {
@@ -2986,6 +3014,6 @@ module.exports = {
     decodeStatusBattery2, decodeCabinTemp,
     createHvacState, feedHvacClimate2, feedHvacClimateMaster, resolveHvacMode,
     calcCarClockOffsetMin, calcFullLocalDateOffsetMin, calcAutoTimeOffsetMin, calcKombiShowTimeOffsetMin, parseHmiTimeZoneOffsetMin,
-    computeFrictionBrake, computeChargingState, decodeDscPressure, decodeDscPedal, decodeDscRegen,
+    computeFrictionBrake, computeChargingState, decodeDscPressure, decodeDscPedal, decodeDscRegen, bcToL100,
     flagActive, gearOf, stageOf, selectionOf, programOf, driveModeOf,
 };
