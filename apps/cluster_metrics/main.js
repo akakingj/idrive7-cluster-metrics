@@ -533,11 +533,15 @@ mgu.run({
                 ui.text('BTN_PROBE_BRAKE', 'Saved ' + asciiOnly(t.probeSavedPath || '/tmp/cluster-metrics-probe.log'));
             }
 
+            const tripDiag = (typeof t.tripDistKm === 'number' && isFinite(t.tripDistKm))
+                ? (' | Trip: ' + (units.distUnit === 'mi' ? (t.tripDistKm * 0.621371).toFixed(1) + ' mi' : t.tripDistKm.toFixed(1) + ' km') +
+                    (typeof t.rawWayPassed === 'number' ? ' (raw=' + t.rawWayPassed + ')' : ''))
+                : '';
             setTwoRow(
                 'DIAG_POWERTRAIN',
                 'Powertrain (' + profile.vehicleType.toUpperCase() + (t.demo ? ' DEMO' : ' LIVE') + ' - ' + profile.mode.toUpperCase() + ')',
                 'Efficiency: ' + hero.value + ' ' + hero.unit + ' | Secondary: ' + (sum.subText || '--') +
-                    ' | Speed: ' + spd.value + ' ' + spd.unit + ' @ ' + Math.round(t.rpm || 0) + ' rpm'
+                    ' | Speed: ' + spd.value + ' ' + spd.unit + ' @ ' + Math.round(t.rpm || 0) + ' rpm' + tripDiag
             );
 
             const socStr = (typeof t.soc === 'number' && isFinite(t.soc)) ? (t.soc.toFixed(1) + '%') : '--';

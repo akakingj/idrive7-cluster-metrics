@@ -3,10 +3,8 @@
  * efficiency.js - raw instantaneous EV (km/kWh) and Fuel (L/100km) trackers,
  * CDS2.statusInjectionVolume delta calibration, and DFCO detection.
  *
- * IMPORTANT DESIGN RULE (User Review Comment #2):
- * When the car stops at a traffic light (speedKmh <= 1.5), efficiency holds its last
- * moving value steady (never switches hero display to "kW IDLE"), because live HVAC/power
- * kW is already displayed continuously on the secondary line directly below.
+ * When stopped (speedKmh <= 1.5), instantaneous efficiency is undefined and returns null
+ * so displays render `--- MPG` / `--- mi/kWh` while live kW or RPM stays on Line 2.
  *
  * Strict Node 8.16.2 (ES2017): no optional chaining, no ??, no dependencies.
  */
@@ -20,8 +18,6 @@ class EfficiencyTracker {
 
     reset() {
         this.lastT = 0;
-        this.lastEvKmPerKwh = null;
-        this.lastFuelLPer100km = null;
 
         // CDS2 16-bit injection volume counter delta + auto-calibrator against DME L/h
         this.lastInjRaw = null;
@@ -123,29 +119,24 @@ class EfficiencyTracker {
             lPerHour = (this.lastBcL100 * speedKmh) / 100;
         }
 
-        // 1) Raw instantaneous EV efficiency (holds last moving value at 0 mph!)
+        // 1) Raw instantaneous EV efficiency (returns null when stopped so UI displays '--- mi/kWh')
         let evInstKmPerKwh = null;
         if (!engineOn && hvKw !== null && speedKmh > 1.5) {
             evInstKmPerKwh = hvKw > 0.1 ? clamp(speedKmh / hvKw, 0.8, 19.0) : 19.0;
-            this.lastEvKmPerKwh = evInstKmPerKwh;
         }
-        const evKmPerKwh = this.lastEvKmPerKwh;
+        const evKmPerKwh = evInstKmPerKwh;
 
-        // 2) Raw instantaneous Fuel efficiency (holds last moving value at 0 mph!)
+        // 2) Raw instantaneous Fuel efficiency (returns null when stopped so UI displays '--- MPG')
         this.isDfco = Boolean(engineOn && speedKmh > 20 && lPerHour !== null && lPerHour < 0.15);
         let fuelInstLPer100km = null;
-        if (engineOn && lPerHour !== null && speedKmh > 1.5) {
-            fuelInstLPer100km = clamp((lPerHour / speedKmh) * 100, 0, 99.9);
-            if (!this.isDfco) {
-                this.lastFuelLPer100km = clamp(fuelInstLPer100km, 0.5, 99.9);
-            }
-        }
-
         let fuelLPer100km = null;
-        if (this.lastFuelLPer100km !== null) {
-            fuelLPer100km = this.lastFuelLPer100km;
-        } else if (this.lastBcL100 !== null) {
-            fuelLPer100km = clamp(this.lastBcL100, 0.5, 99.9);
+        if (engineOn && speedKmh > 1.5) {
+            if (lPerHour !== null) {
+                fuelInstLPer100km = clamp((lPerHour / speedKmh) * 100, 0, 99.9);
+                fuelLPer100km = clamp(fuelInstLPer100km, 0.5, 99.9);
+            } else if (this.lastBcL100 !== null) {
+                fuelLPer100km = clamp(this.lastBcL100, 0.5, 99.9);
+            }
         }
 
         return {

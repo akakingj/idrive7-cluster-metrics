@@ -364,6 +364,8 @@
           "WIDGET_CHARGING",
           "Right widget: Charging finish time (auto)"
         ],
+        "belowSpeedLine1",
+        "belowSpeedLine2",
         "gearDisplay",
         "cabinTempDisplay",
         "hvSocGauge",
@@ -767,6 +769,38 @@
         [
           "oil_gbx",
           "Oil + Gearbox oil"
+        ],
+        [
+          "off",
+          "Off"
+        ]
+      ]
+    },
+    {
+      "key": "belowSpeedLine1",
+      "label": "Below speed Line 1 (top)",
+      "type": "choice",
+      "default": "efficiency",
+      "options": [
+        [
+          "efficiency",
+          "Efficiency / Charging kW"
+        ],
+        [
+          "off",
+          "Off"
+        ]
+      ]
+    },
+    {
+      "key": "belowSpeedLine2",
+      "label": "Below speed Line 2 (bottom)",
+      "type": "choice",
+      "default": "power",
+      "options": [
+        [
+          "power",
+          "Power kW / Live RPM & Boost"
         ],
         [
           "off",

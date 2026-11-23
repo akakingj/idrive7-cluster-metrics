@@ -152,23 +152,15 @@ function inBox(x, y, box) {
         assert.strictEqual(unitsMod.formatTemp(23.5, unitsMod.US_PRESET).text, '74\u00B0F');
     });
 
-    /* 4. Efficiency Integration (No IDLE Hijack at 0 mph) */
-    await test('Efficiency holds rolling mi/kWh at 0 mph (never IDLE hijack) & handles DFCO', () => {
+    /* 4. Efficiency Raw Instantaneous (Shows '---' at 0 mph) & DFCO */
+    await test('Efficiency reports raw instant mi/kWh when moving, returns null (---) at 0 mph & handles DFCO', () => {
         const eff = new EfficiencyTracker();
         let t = 100000;
-        for (let i = 0; i <= 30; i++) {
-            t += 1000;
-            eff.update({ speedKmh: 72, rpm: 0, engineOn: false, hvKw: 12.0 }, t);
-        }
         const cruising = eff.update({ speedKmh: 72, rpm: 0, engineOn: false, hvKw: 12.0 }, t + 1000);
-        assert(Math.abs(cruising.evKmPerKwh - 6.0) < 0.2, 'expected ~6.0 km/kWh, got ' + cruising.evKmPerKwh);
+        assert(Math.abs(cruising.evKmPerKwh - 6.0) < 0.05, 'expected 6.0 km/kWh, got ' + cruising.evKmPerKwh);
 
-        let stopped;
-        for (let i = 0; i < 20; i++) {
-            t += 1000;
-            stopped = eff.update({ speedKmh: 0, rpm: 0, engineOn: false, hvKw: 1.6 }, t);
-        }
-        assert(Math.abs(stopped.evKmPerKwh - cruising.evKmPerKwh) < 0.01, 'must hold EV efficiency at 0 mph');
+        const stopped = eff.update({ speedKmh: 0, rpm: 0, engineOn: false, hvKw: 1.6 }, t + 2000);
+        assert.strictEqual(stopped.evKmPerKwh, null, 'stopped at 0 mph must return null so UI shows --- mi/kWh');
 
         const renderer = new OverlayRenderer({ allowPanel: true });
         const profile = { vehicleType: 'phev', engineOn: false, mode: 'ev_drive', isEv: true, isCold: false, coldCeilingRpm: null, alert: null };
@@ -177,13 +169,13 @@ function inBox(x, y, box) {
             units: unitsMod.US_PRESET,
             profile,
             efficiency: stopped,
-        }, { enabled: true, gearDisplay: 'next_to_d' }, t);
-        assert.strictEqual(renderer.lastSummary.hero.value, '3.7');
+        }, { enabled: true, gearDisplay: 'next_to_d' }, t + 2000);
+        assert.strictEqual(renderer.lastSummary.hero.value, '---');
         assert.strictEqual(renderer.lastSummary.hero.unit, 'mi/kWh');
         assert.strictEqual(renderer.lastSummary.subText, '1.6 kW');
         assert.strictEqual(renderer.lastSummary.subBolt, false);
 
-        const gasRes = eff.update({ speedKmh: 95, rpm: 1800, engineOn: true, dmeFuelLh: 0.0 }, t + 1000);
+        const gasRes = eff.update({ speedKmh: 95, rpm: 1800, engineOn: true, dmeFuelLh: 0.0 }, t + 3000);
         assert.strictEqual(gasRes.isDfco, true);
     });
 
@@ -1671,13 +1663,13 @@ function inBox(x, y, box) {
         let titleGlyphPixels = 0;
         let artistGlyphPixels = 0;
         const rwCv = r.layers.right_widget.cv;
-        for (let y = 286; y <= 324; y++) {
+        for (let y = 308; y <= 346; y++) {
             for (let x = 90; x <= 340; x++) {
                 const o = (y * rwCv.w + x) * 4;
                 if (rwCv.d[o] > 210 && rwCv.d[o + 1] > 210 && rwCv.d[o + 2] > 210 && rwCv.d[o + 3] > 200) titleGlyphPixels++;
             }
         }
-        for (let y = 332; y <= 368; y++) {
+        for (let y = 354; y <= 390; y++) {
             for (let x = 90; x <= 340; x++) {
                 const o = (y * rwCv.w + x) * 4;
                 if (rwCv.d[o] > 165 && rwCv.d[o + 1] > 170 && rwCv.d[o + 3] > 200) artistGlyphPixels++;
@@ -2243,8 +2235,8 @@ function inBox(x, y, box) {
         const alphaAt = (wx, wy) => bg[((wy - 88) * 536 + (wx - 1244)) * 4 + 3];
         assert(alphaAt(1248, 96) > 20, 'backdrop must fill pointed top-left eyebrow tip at (1248, 96)');
         assert.strictEqual(alphaAt(1560, 122), 0, 'backdrop must NOT exceed top-right bezel at (1560, 122)');
-        assert(alphaAt(1755, 355) > 20, 'backdrop must fill mid-right bezel curve at (1755, 355)');
-        assert.strictEqual(alphaAt(1768, 355), 0, 'backdrop must NOT spill past outer-right bezel at (1768, 355)');
+        assert(alphaAt(1768, 355) > 20, 'backdrop must fill mid-right bezel curve out to (1768, 355)');
+        assert.strictEqual(alphaAt(1776, 355), 0, 'backdrop must NOT spill past outer-right bezel at (1776, 355)');
         assert.strictEqual(alphaAt(1400, 600), 0, 'backdrop must NOT spill onto bottom-left map at (1400, 600)');
         assert(alphaAt(1560, 592) > 20, 'backdrop must reach bottom-right gauge curve at (1560, 592)');
         assert.strictEqual(alphaAt(1560, 606), 0, 'backdrop must stop cleanly above Power % / 100% strip at y>=604');
@@ -2565,7 +2557,7 @@ function inBox(x, y, box) {
         assert.strictEqual(r.lastSummary.subText, '2143 RPM  +5.1 PSI', 'Warm gas mode must show raw Live RPM + Turbo Boost PSI');
         assert.strictEqual(r.lastSummary.subCol, '#f2f5fa', 'Warm gas mode Line 2 must stay white');
 
-        // Check '/' forward-slash right end of cyan progress fill bar at barY=418 (top row y=418 vs bottom row y=429)
+        // Check '/' forward-slash right end of cyan progress fill bar at barY=440 (top row y=440 vs bottom row y=451)
         const rw = r.layers.right_widget.cv;
         const maxCyanX = (py) => {
             let mx = -1;
@@ -2575,8 +2567,8 @@ function inBox(x, y, box) {
             }
             return mx;
         };
-        const topBarRight = maxCyanX(418);
-        const botBarRight = maxCyanX(429);
+        const topBarRight = maxCyanX(440);
+        const botBarRight = maxCyanX(451);
         assert(topBarRight > botBarRight + 8,
             'Media progress bar must slant "/" (top-right > bottom-right), got top=' + topBarRight + ' vs bot=' + botBarRight);
     });
@@ -2757,7 +2749,9 @@ function inBox(x, y, box) {
         res = et.update({ speedKmh: 72, rpm: 0, engineOn: false, hvKw: 24.0 }, 1200);
         assert(Math.abs(res.evKmPerKwh - 3.0) < 0.01, 'step change 12->24 kW must jump immediately to 3.0 km/kWh with zero smoothing');
         res = et.update({ speedKmh: 0, rpm: 0, engineOn: false, hvKw: 1.2 }, 1500);
-        assert(Math.abs(res.evKmPerKwh - 3.0) < 0.01, 'stopping at 0 mph must hold last moving EV efficiency');
+        assert.strictEqual(res.evKmPerKwh, null, 'stopping at 0 mph must return null so UI displays --- mi/kWh');
+        res = et.update({ speedKmh: 0, rpm: 750, engineOn: true, dmeFuelLh: 0.9 }, 1600);
+        assert.strictEqual(res.fuelLPer100km, null, 'stopping at 0 mph in gas mode must return null so UI displays --- MPG');
 
         res = et.update({ speedKmh: 64.37, rpm: 1800, engineOn: true, dmeFuelLh: 4.30 }, 2000);
         const l100A = (4.30 / 64.37) * 100;
@@ -2905,6 +2899,98 @@ function inBox(x, y, box) {
             if (laneCv.d[o] > 200 && laneCv.d[o + 3] > 200) stemWidthPx++;
         }
         assert(stemWidthPx >= 7, 'Straight lane arrow stem must be bold (>=7px wide), got ' + stemWidthPx + 'px');
+    });
+
+    /* 27. Stopped '---' Efficiency, KombiIF Trip km->mi Fix, Media Wing Calibration (+22px & Middle-Right Curve), and Cluster Below-Speed Per-Line Off */
+    await test('Stopped --- MPG/mi/kWh, KombiIF trip km decoding, calibrated media backdrop & per-line belowSpeed Off toggles', async () => {
+        // 1. Stopped at red light: '--- MPG' (Gas) and '--- mi/kWh' (EV)
+        assert.strictEqual(unitsMod.formatEvEff(null, unitsMod.US_PRESET).value, '---');
+        assert.strictEqual(unitsMod.formatFuelEff(null, false, unitsMod.US_PRESET).value, '---');
+
+        const et = new EfficiencyTracker();
+        assert(Math.abs(et.update({ speedKmh: 60, rpm: 1800, engineOn: true, dmeFuelLh: 5.0, bcFuelLPer100km: 8.5 }, 1000).fuelLPer100km - 8.333) < 0.05);
+        const gasStopped = et.update({ speedKmh: 0, rpm: 750, engineOn: true, dmeFuelLh: 0.8, bcFuelLPer100km: 8.5 }, 1500);
+        assert.strictEqual(gasStopped.fuelLPer100km, null, 'stopped gas engine must NOT fall back to bcFuelLPer100km');
+        assert.strictEqual(gasStopped.isDfco, false);
+
+        // 2. KombiIF.statusBordcomputerTravelData.wayPassed is ALWAYS in km (never double-scaled on US cars!)
+        const appSpec = JSON.parse(fs.readFileSync(path.join(APP_DIR, 'app.json'), 'utf8'));
+        const watchHandlers = {};
+        const fakeSigs = {
+            watch(iface, inst, handlers) {
+                watchHandlers[iface] = handlers;
+                return Promise.resolve({ shutdown() {} });
+            },
+        };
+        const hub = new SignalHub({
+            spec: appSpec,
+            settings: { values: { enabled: true, demo: 'off', unitSystem: 'us' }, get(k) { return this.values[k]; } },
+            signals: fakeSigs,
+            log: { info() {}, warn() {}, error() {} },
+        }, { noDiag: true, ipcDir: path.join(os.tmpdir(), 'cm-trip-test-' + process.pid), edriveSharedPath: '' });
+        hub.start();
+        await new Promise((res) => setTimeout(res, 20));
+        watchHandlers['de.bmw.infotainment.KombiIF'].statusBordcomputerTravelData({
+            wayPassed: 100, rideDurationHours: 1, rideDurationMinutes: 25,
+        });
+        const snapTrip = hub.snapshot(Date.now());
+        assert.strictEqual(snapTrip.tripDistKm, 100, 'wayPassed=100 must stay 100 km (62.1 mi), never 160.9 km on US cars');
+        assert.strictEqual(snapTrip.rawWayPassed, 100);
+        assert.strictEqual(snapTrip.tripMinutes, 85);
+        hub.stop();
+
+        // 3. Media wing backdrop calibration (top inset y>=91, bottom inset y<=599, middle-right reaches x=1768 at y=358)
+        const { buildStockBackdrop } = require(path.join(APP_DIR, 'image_decode'));
+        const cov = { w: 176, h: 176, d: Buffer.alloc(176 * 176 * 4, 210) };
+        const bg = buildStockBackdrop(cov, 536, 520, { ox: 1244, oy: 88, vx: 220, vy: 274 });
+        const alphaAt = (wx, wy) => bg[((wy - 88) * 536 + (wx - 1244)) * 4 + 3];
+        assert.strictEqual(alphaAt(1300, 90), 0, 'top edge must stay inset cleanly below y=90');
+        assert.strictEqual(alphaAt(1520, 600), 0, 'bottom edge must stay inset cleanly above y=600');
+        assert(alphaAt(1768, 358) > 35, 'middle-right backdrop must reach cyan arc around x=1768 at y=358, got alpha=' + alphaAt(1768, 358));
+
+        // 4. Cluster below_speed & map_speed per-line Off settings
+        const r = new OverlayRenderer({ allowPanel: true });
+        const m = {
+            units: unitsMod.US_PRESET,
+            profile: { vehicleType: 'phev', engineOn: false, mode: 'ev_drive', isEv: true, isCold: false, coldCeilingRpm: null, alert: null },
+            efficiency: { evKmPerKwh: 6.0, fuelLPer100km: null, isDfco: false },
+            telemetry: { speedKmh: 72, rpm: 0, hvKw: 12.4, soc: 68, soc12: 88, stage: 'D', program: 'D', gear: 5, frictionG: 0 },
+        };
+        const countBandPx = (cv, y0, y1) => {
+            let n = 0;
+            for (let y = y0; y < y1; y++) {
+                for (let x = 0; x < cv.w; x++) if (cv.d[(y * cv.w + x) * 4 + 3] > 180) n++;
+            }
+            return n;
+        };
+
+        // Line 1 ON, Line 2 OFF -> top band painted, bottom band empty
+        r.render(m, { enabled: true, belowSpeedLine1: 'efficiency', belowSpeedLine2: 'off', gearDisplay: 'next_to_d' }, 5000);
+        assert.strictEqual(r.layers.below_speed.visible, true);
+        assert(countBandPx(r.layers.below_speed.cv, 4, 52) > 200, 'Line 1 ON must paint top band');
+        assert.strictEqual(countBandPx(r.layers.below_speed.cv, 55, 84), 0, 'Line 2 OFF must leave bottom band completely empty');
+
+        // Line 1 OFF, Line 2 ON -> Line 2 shifts cleanly up to y=44
+        r.render(m, { enabled: true, belowSpeedLine1: 'off', belowSpeedLine2: 'power', gearDisplay: 'next_to_d' }, 5100);
+        assert.strictEqual(r.layers.below_speed.visible, true);
+        assert(countBandPx(r.layers.below_speed.cv, 20, 52) > 100, 'Line 1 OFF + Line 2 ON must draw power line cleanly up at y=44');
+        assert.strictEqual(countBandPx(r.layers.below_speed.cv, 56, 84), 0, 'bottom band must stay clean when Line 2 shifts up');
+
+        // BOTH OFF -> below_speed hidden completely (and HUD stays visible!)
+        r.render(m, { enabled: true, belowSpeedLine1: 'off', belowSpeedLine2: 'off', gearDisplay: 'next_to_d' }, 5200);
+        assert.strictEqual(r.layers.below_speed.visible, false, 'both lines OFF must hide below_speed layer completely');
+        assert.strictEqual(r.lastSummary.showBelowSpeed, false);
+        assert.strictEqual(r.layers.hud_main.visible, true, 'disabling cluster below_speed must not hide HUD');
+
+        // Also hides map_speed in map_only mode (both from scratch and after previously enabled over Waze map)
+        const tmpWaze = path.join(os.tmpdir(), 'cm-waze-test27-' + process.pid + '.json');
+        fs.writeFileSync(tmpWaze, JSON.stringify({ state: 'showing', target: 'map' }));
+        const rMap = new OverlayRenderer({ allowPanel: true, wazeStatusPath: tmpWaze });
+        rMap.render(m, { enabled: true, clusterSlotMode: 'map_only', belowSpeedLine1: 'efficiency', belowSpeedLine2: 'power', gearDisplay: 'next_to_d' }, 5300);
+        assert.strictEqual(rMap.layers.map_speed.visible, true);
+        rMap.render(m, { enabled: true, clusterSlotMode: 'map_only', belowSpeedLine1: 'off', belowSpeedLine2: 'off', gearDisplay: 'next_to_d' }, 5350);
+        assert.strictEqual(rMap.layers.map_speed.visible, false, 'both lines OFF must also hide map_speed in map_only mode');
+        fs.unlinkSync(tmpWaze);
     });
 
     console.log('\nAll ' + passed + ' tests passed.');

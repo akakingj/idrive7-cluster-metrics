@@ -1927,6 +1927,9 @@ class SignalHub {
         watch('de.bmw.infotainment.KombiIF', {
             statusRangeTankStatus: (v) => {
                 if (v && typeof v.range === 'number' && v.range < 4095) this.live.frangeKm = v.range;
+                if (v && typeof v.mileageKilometre === 'number' && v.mileageKilometre < 16777215) {
+                    this.live.odoKm = v.mileageKilometre;
+                }
             },
             displayRangeElectricVehicle: (v) => {
                 const rawEr = v && typeof v === 'object' ? v.displayRangeElectricVehicle : v;
@@ -1950,9 +1953,10 @@ class SignalHub {
             },
             statusBordcomputerTravelData: (v) => {
                 if (!v || typeof v !== 'object') return;
+                // KombiIF.statusBordcomputerTravelData.wayPassed is always in km (never display miles)
                 if (typeof v.wayPassed === 'number' && v.wayPassed < 65535) {
-                    const inMiles = this.resolvedUnits().distUnit === 'mi';
-                    this.live.tripDistKm = inMiles ? v.wayPassed * 1.609344 : v.wayPassed;
+                    this.live.rawWayPassed = v.wayPassed;
+                    this.live.tripDistKm = v.wayPassed;
                 }
                 if (typeof v.rideDurationHours === 'number' && v.rideDurationHours < 4095 &&
                     typeof v.rideDurationMinutes === 'number' && v.rideDurationMinutes < 60) {
@@ -3112,6 +3116,8 @@ class SignalHub {
             localClockOffsetMin,
             carClockSource: l.carClockSource || null,
             tripDistKm: l.tripDistKm !== undefined ? l.tripDistKm : null,
+            rawWayPassed: l.rawWayPassed !== undefined ? l.rawWayPassed : null,
+            odoKm: l.odoKm !== undefined ? l.odoKm : null,
             tripMinutes: l.tripMinutes !== undefined ? l.tripMinutes : null,
             bcAvgSpeedKmh: l.bcAvgSpeedKmh !== undefined ? l.bcAvgSpeedKmh : null,
             probeRemainingSec,

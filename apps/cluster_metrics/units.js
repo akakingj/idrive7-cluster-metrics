@@ -160,7 +160,7 @@ function formatEvEff(kmPerKwh, units) {
     };
     const unitLabel = labelMap[mode] || 'mi/kWh';
     if (typeof kmPerKwh !== 'number' || !isFinite(kmPerKwh) || kmPerKwh <= 0) {
-        return { value: '--', unit: unitLabel };
+        return { value: '---', unit: unitLabel };
     }
     if (mode === 'kwh_100km') {
         const kwh100 = Math.min(99.9, Math.max(4.0, 100 / kmPerKwh));
@@ -187,7 +187,7 @@ function formatFuelEff(lPer100km, isDfco, units) {
         return { value: mode === 'l_100km' ? '0.0' : '99+', unit: unitLabel };
     }
     if (typeof lPer100km !== 'number' || !isFinite(lPer100km) || lPer100km <= 0) {
-        return { value: '--', unit: unitLabel };
+        return { value: '---', unit: unitLabel };
     }
     if (mode === 'l_100km') {
         return { value: Math.min(99.9, lPer100km).toFixed(1), unit: unitLabel };

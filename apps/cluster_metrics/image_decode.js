@@ -247,29 +247,29 @@ function pwl(pts, x) {
     return last[1];
 }
 
-// Homography-calibrated 1920x720 G30 right-wing Power % gauge face (measured directly from real 530e KOMBI4 photo):
-// Fills the pointed top-left eyebrow handle (x=1245..1356, y=89..122), smooth inner-left boomerang curve,
-// trims the top-right curve strictly inside the cyan bezel, hugs the outer-right cyan glow out to x=1762,
-// and stops cleanly at y=601 above the bottom '100 %' / 'Power %' row.
+// Homography-calibrated 1920x720 G30 right-wing Power % gauge face (verified against live 530e KOMBI4 photos):
+// Fills the pointed top-left eyebrow handle (x=1245..1356, y=91..122), smooth inner-left boomerang curve,
+// insets top & bottom edges ~2px cleanly inside the inner cyan rim (y=91..599), and extends the middle-right
+// curve out to x=1772 so it reaches the glowing cyan bezel cleanly around 20 / eDRIVE / 0 / READY / CHARGE.
 const WING_TOP_Y = [
-    [1245, 89], [1295, 92], [1350, 97], [1390, 102], [1430, 108],
-    [1470, 114], [1508, 121], [1545, 132], [1585, 149], [1625, 175],
-    [1665, 208], [1696, 240], [1740, 296], [1762, 355],
+    [1245, 91], [1295, 94], [1350, 99], [1390, 104], [1430, 110],
+    [1470, 116], [1508, 123], [1545, 134], [1585, 151], [1625, 177],
+    [1665, 210], [1702, 240], [1740, 285], [1762, 325], [1772, 358],
 ];
 const WING_OUTER_X = [
-    [89, 1390], [102, 1390], [114, 1470], [121, 1508], [132, 1545],
-    [149, 1585], [175, 1625], [208, 1665], [240, 1696], [275, 1726],
-    [305, 1748], [335, 1760], [360, 1762], [385, 1757], [410, 1746],
-    [445, 1727], [485, 1704], [525, 1681], [560, 1656], [585, 1633],
-    [601, 1610],
+    [91, 1390], [104, 1390], [116, 1470], [123, 1508], [134, 1545],
+    [151, 1585], [177, 1625], [210, 1665], [240, 1702], [275, 1734],
+    [305, 1756], [335, 1769], [360, 1772], [385, 1768], [410, 1759],
+    [445, 1741], [485, 1717], [525, 1690], [560, 1660], [585, 1633],
+    [599, 1612],
 ];
 const WING_INNER_X = [
-    [89, 1245], [104, 1249], [117, 1255], [122, 1356], [136, 1372],
+    [91, 1245], [104, 1249], [117, 1255], [122, 1356], [136, 1372],
     [164, 1392], [205, 1417], [250, 1444], [295, 1471], [335, 1496],
     [360, 1505], [380, 1504], [415, 1493], [460, 1476], [520, 1455],
-    [575, 1437], [601, 1430],
+    [575, 1437], [599, 1430],
 ];
-const WING_BOTTOM_Y = 601;
+const WING_BOTTOM_Y = 599;
 
 /**
  * Full-wing gauge-edge translucent album-art backdrop matching BMW's stock Media widget:
@@ -336,7 +336,7 @@ function buildStockBackdrop(cover, cw, ch, opts) {
         const rowOut = y * cw;
         const vdy = (y - vy) / ryVig;
 
-        const inYBand = wy >= 89 && wy <= WING_BOTTOM_Y;
+        const inYBand = wy >= 91 && wy <= WING_BOTTOM_Y;
         const botAa = inYBand ? smoothstep(WING_BOTTOM_Y, WING_BOTTOM_Y - 3, wy) : 0;
         const innerX = inYBand ? pwl(WING_INNER_X, wy) : 9999;
         const outerX = inYBand ? pwl(WING_OUTER_X, wy) : -1;
