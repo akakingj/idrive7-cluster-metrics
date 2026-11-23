@@ -222,11 +222,12 @@ function formatSpeed(kmh, units) {
 }
 
 function formatPowerKw(kw) {
-    if (typeof kw !== 'number' || !isFinite(kw)) return { value: '--', unit: 'kW', text: '-- kW' };
+    if (typeof kw !== 'number' || !isFinite(kw)) return { value: '--', unit: 'kW', text: '-- kW', charging: false };
+    const charging = kw < -0.05;
     const abs = Math.abs(kw);
-    const sign = kw > 0.05 ? '+' : kw < -0.05 ? '-' : '';
     const num = abs >= 100 ? abs.toFixed(0) : abs.toFixed(1);
-    return { value: sign + num, unit: 'kW', text: sign + num + ' kW' };
+    const val = charging ? ('+' + num) : num;
+    return { value: val, unit: 'kW', text: val + ' kW', charging };
 }
 
 module.exports = {

@@ -49,17 +49,50 @@ const BOLT_ROWS = [
     [3, 4], [3, 3], [2, 4], [2, 3], [1, 3], [1, 2],
 ];
 
-function drawLightningBolt(cv, x0, y0, col) {
-    cv.fillRect(x0 + 3, y0 - 1, 5, 1, COL.outline);
-    for (let r = 0; r < BOLT_ROWS.length; r++) {
-        const dx = BOLT_ROWS[r][0];
-        const w = BOLT_ROWS[r][1];
-        cv.fillRect(x0 + dx - 1, y0 + r, w + 2, 1, COL.outline);
+function boltWidth(heightPx) {
+    const h = typeof heightPx === 'number' && heightPx > 0 ? heightPx : 13;
+    return h <= 14 ? 8 : Math.max(8, Math.round(h * 0.60));
+}
+
+function drawLightningBolt(cv, x0, y0, col, heightPx) {
+    const h = typeof heightPx === 'number' && heightPx > 0 ? heightPx : 13;
+    if (h <= 14) {
+        cv.fillRect(x0 + 3, y0 - 1, 5, 1, COL.outline);
+        for (let r = 0; r < BOLT_ROWS.length; r++) {
+            const dx = BOLT_ROWS[r][0];
+            const w = BOLT_ROWS[r][1];
+            cv.fillRect(x0 + dx - 1, y0 + r, w + 2, 1, COL.outline);
+        }
+        cv.fillRect(x0, y0 + BOLT_ROWS.length, 4, 1, COL.outline);
+        for (let r = 0; r < BOLT_ROWS.length; r++) {
+            cv.fillRect(x0 + BOLT_ROWS[r][0], y0 + r, BOLT_ROWS[r][1], 1, col);
+        }
+        return 8;
     }
-    cv.fillRect(x0, y0 + BOLT_ROWS.length, 4, 1, COL.outline);
-    for (let r = 0; r < BOLT_ROWS.length; r++) {
-        cv.fillRect(x0 + BOLT_ROWS[r][0], y0 + r, BOLT_ROWS[r][1], 1, col);
-    }
+    const w = boltWidth(h);
+    const drawPair = (ox, oy, c) => {
+        const x = x0 + ox;
+        const y = y0 + oy;
+        cv.triangle([
+            [x + w * 0.66, y],
+            [x, y + h * 0.55],
+            [x + w * 0.54, y + h * 0.55],
+        ], c);
+        cv.triangle([
+            [x + w, y + h * 0.45],
+            [x + w * 0.34, y + h],
+            [x + w * 0.46, y + h * 0.45],
+        ], c);
+    };
+    const r = h >= 24 ? 1.5 : 1;
+    drawPair(-r, 0, COL.outline);
+    drawPair(r, 0, COL.outline);
+    drawPair(0, -r, COL.outline);
+    drawPair(0, r, COL.outline);
+    drawPair(-1, -1, COL.outline);
+    drawPair(1, 1, COL.outline);
+    drawPair(0, 0, col);
+    return w;
 }
 
 // Shifted +16px down so there is generous breathing room under the main digital speed digits while clearing the traffic light sign (>=536)
@@ -755,11 +788,14 @@ class OverlayRenderer {
         let heroUnitCol = COL.softBlue;
         let subText = '';
         let subCol = COL.softBlue;
+        let subBolt = false;
 
         if (isCharging) {
+            const hasChgKw = typeof chg.chargeKw === 'number' && isFinite(chg.chargeKw);
             hero = {
-                value: (typeof chg.chargeKw === 'number' && isFinite(chg.chargeKw)) ? chg.chargeKw.toFixed(1) : '--',
+                value: hasChgKw ? ('+' + chg.chargeKw.toFixed(1)) : '--',
                 unit: 'kW',
+                bolt: hasChgKw,
             };
             heroCol = COL.cyan;
             subText = chg.maxAmps ? ('CHARGING ' + Math.round(chg.maxAmps) + 'A') : 'CHARGING';
@@ -774,10 +810,11 @@ class OverlayRenderer {
             if (profile.isEv) {
                 const pFmt = formatPowerKw(t.hvKw);
                 subText = pFmt.text;
+                subBolt = Boolean(pFmt.charging);
                 subCol = (t.hvKw !== null && t.hvKw > 55) ? COL.amber : COL.cyan;
             } else {
                 const rpmLive = (typeof t.rpm === 'number' && isFinite(t.rpm) && t.rpm > 0)
-                    ? (t.rpm >= 100 ? Math.round(t.rpm / 10) * 10 : Math.round(t.rpm))
+                    ? Math.round(t.rpm)
                     : null;
                 const rpmStr = rpmLive !== null ? String(rpmLive) : '--';
                 if (profile.isCold && profile.coldCeilingRpm) {
@@ -852,7 +889,7 @@ class OverlayRenderer {
         );
 
         this.lastSummary = {
-            hero, heroCol, heroUnitCol, subText, subCol, inNormalD, dGearText,
+            hero, heroCol, heroUnitCol, subText, subCol, subBolt, inNormalD, dGearText,
             isParked, isCharging, showBrakeRail, brakeHold,
             iceChargeActive, iceChargeKw, iceChargeLit,
             panelAllowed, showHud, showOwnHudNav, showHudRoad, showHudHeadway, hudHeadwayMode,
@@ -876,7 +913,7 @@ class OverlayRenderer {
                 h: BELOW_SPEED_BASE.h,
             };
             const lBs = this._ensureOrLocal('below_speed', Object.assign({ target: 'panel', visible: true, z: 12 }, bsRect));
-            this._paintBelowSpeed(lBs.cv, hero, heroCol, heroUnitCol, subText, subCol, gearDisplay === 'below_speed' ? dGearText : '', gearDisplay === 'below_speed', 108);
+            this._paintBelowSpeed(lBs.cv, hero, heroCol, heroUnitCol, subText, subCol, subBolt, gearDisplay === 'below_speed' ? dGearText : '', gearDisplay === 'below_speed', 108);
             this._setVisible('below_speed', true);
             this._upload('below_speed');
 
@@ -1083,8 +1120,8 @@ class OverlayRenderer {
             this._setVisible('hud_road', false);
         }
 
-        // 2b. HUD TELEMETRY LAYER (260x100 at y=100..200 <= 202 ACC; shifts metrics cleanly into Row 2 when showHudRoad is true!)
-        const hudX = clamp(HUD_BASE.x + hx, 120, 144);
+        // 2b. HUD TELEMETRY LAYER (268x100 at y=100..200 <= 202 ACC; uniform non-jumping layout below hud_road & strictly left of hud_headway)
+        const hudX = clamp(HUD_BASE.x + hx, 120, 140);
         const lHud = this._ensureOrLocal('hud_main', {
             target: 'hud', klass: 'overlay', x: hudX, y: hudTopY, w: HUD_BASE.w, h: HUD_BASE.h, visible: showHud, z: 12,
         });
@@ -1092,7 +1129,7 @@ class OverlayRenderer {
             this._paintHud(
                 lHud.cv,
                 [hudLine1, hudLine2, hudLine3],
-                hero, heroCol, heroUnitCol, subText, subCol,
+                hero, heroCol, heroUnitCol, subText, subCol, subBolt,
                 gearDisplay !== 'off' ? dGearText : '',
                 t, profile, units, fg, brakeLit, brakeHold, activeAlert,
                 showHudRoad, showHudHeadway, iceChargeKw
@@ -1103,10 +1140,10 @@ class OverlayRenderer {
             this._setVisible('hud_main', false);
         }
 
-        // 2b2. HUD LEAD-CAR HEADWAY BADGE (124x45 at x=280..404 < 405 nav, y=140..185 > 138 road & < 202 ACC)
+        // 2b2. HUD LEAD-CAR HEADWAY BADGE (120x41 at x=284..404 < 405 nav, y=139..180 > 138 road & < 202 ACC)
         if (showHudHeadway) {
             const hwX = clamp(HUD_HEADWAY_BASE.x + hx, 268, 404 - HUD_HEADWAY_BASE.w);
-            const hwMinY = showHudRoad ? (hudTopY + HUD_ROAD_H + 1) : 104;
+            const hwMinY = hudTopY + HUD_ROAD_H + 1;
             const hwY = clamp(HUD_HEADWAY_BASE.y + hy, hwMinY, 201 - HUD_HEADWAY_BASE.h);
             const lHudHw = this._ensureOrLocal('hud_headway', {
                 target: 'hud', klass: 'overlay', x: hwX, y: hwY, w: HUD_HEADWAY_BASE.w, h: HUD_HEADWAY_BASE.h, visible: true, z: 13,
@@ -1150,7 +1187,7 @@ class OverlayRenderer {
                 x: msRect.x, y: msRect.y, w: msRect.w, h: msRect.h,
                 visible: true, z: 20,
             });
-            this._paintBelowSpeed(lMapSpd.cv, hero, heroCol, heroUnitCol, subText, subCol, gearDisplay === 'below_speed' ? dGearText : '', gearDisplay === 'below_speed', 84);
+            this._paintBelowSpeed(lMapSpd.cv, hero, heroCol, heroUnitCol, subText, subCol, subBolt, gearDisplay === 'below_speed' ? dGearText : '', gearDisplay === 'below_speed', 84);
             this._setVisible('map_speed', true);
             this._upload('map_speed');
 
@@ -1221,22 +1258,45 @@ class OverlayRenderer {
         return this.layers[name];
     }
 
-    _paintBelowSpeed(cv, hero, heroCol, heroUnitCol, subText, subCol, gearStr, reserveGearSlot, heroRightX) {
+    _paintBelowSpeed(cv, hero, heroCol, heroUnitCol, subText, subCol, subBolt, gearStr, reserveGearSlot, heroRightX) {
         cv.clear(COL.clear);
         const baseRx = typeof heroRightX === 'number' ? heroRightX : 108;
-        const rx = Math.max(baseRx, 6 + cv.textWidth(String(hero.value || ''), 44, { font: 'num' }));
-        drawTextOutline(cv, hero.value, rx, 43, 44, heroCol, { font: 'num', align: 'right' });
+        const heroValStr = String(hero.value || '');
+        const heroValW = cv.textWidth(heroValStr, 44, { font: 'num' });
+        const heroBoltH = 28;
+        const heroBoltW = hero.bolt ? (boltWidth(heroBoltH) + 5) : 0;
+        const rx = Math.max(baseRx, 6 + heroBoltW + Math.ceil(heroValW));
+        if (hero.bolt) {
+            const bx = Math.max(4, Math.round(rx - heroValW - heroBoltW));
+            drawLightningBolt(cv, bx, 13, heroCol, heroBoltH);
+        }
+        drawTextOutline(cv, heroValStr, rx, 43, 44, heroCol, { font: 'num', align: 'right' });
         const unitSize = String(hero.unit || '').length > 6 ? 17 : 21;
         drawTextOutline(cv, hero.unit, rx + 7, 39, unitSize, heroUnitCol || COL.softBlue, { font: 'bold', align: 'left' });
+
+        const subBoltH = 17;
+        const subBoltPad = subBolt ? (boltWidth(subBoltH) + 4) : 0;
         if (reserveGearSlot) {
-            const sFit = fitTextLine(cv, subText, rx + 16, [21, 19, 17, 15], 'bold');
-            drawTextOutline(cv, sFit.text, rx + 22, 75, sFit.size, subCol, { font: 'bold', align: 'right' });
+            const sFit = fitTextLine(cv, subText, Math.max(40, rx + 16 - subBoltPad), [21, 19, 17, 15], 'bold');
+            const sw = drawTextOutline(cv, sFit.text, rx + 22, 75, sFit.size, subCol, { font: 'bold', align: 'right' });
+            if (subBolt) {
+                const bx = Math.max(2, Math.round(rx + 22 - sw - subBoltPad));
+                drawLightningBolt(cv, bx, 75 - subBoltH + 1, subCol, subBoltH);
+            }
             if (gearStr) {
                 drawTextOutline(cv, gearStr, rx + 32, 75, 22, COL.white, { font: 'bold', align: 'left' });
             }
         } else {
-            const sFit = fitTextLine(cv, subText, cv.w - 12, [22, 20, 18, 16], 'bold');
-            drawTextOutline(cv, sFit.text, Math.round(cv.w / 2), 75, sFit.size, subCol, { font: 'bold', align: 'center' });
+            const sFit = fitTextLine(cv, subText, Math.max(40, cv.w - 12 - subBoltPad), [22, 20, 18, 16], 'bold');
+            if (subBolt) {
+                const tw = cv.textWidth(sFit.text, sFit.size, { font: 'bold' });
+                const totalW = subBoltPad + tw;
+                const x0 = Math.max(4, Math.round((cv.w - totalW) / 2));
+                drawLightningBolt(cv, x0, 75 - subBoltH + 1, subCol, subBoltH);
+                drawTextOutline(cv, sFit.text, x0 + subBoltPad, 75, sFit.size, subCol, { font: 'bold', align: 'left' });
+            } else {
+                drawTextOutline(cv, sFit.text, Math.round(cv.w / 2), 75, sFit.size, subCol, { font: 'bold', align: 'center' });
+            }
         }
     }
 
@@ -1773,12 +1833,12 @@ class OverlayRenderer {
         }
     }
 
-    _paintHud(cv, lineModes, hero, heroCol, heroUnitCol, subText, subCol, gearStr, t, profile, units, fg, brakeLit, brakeHold, alertObj, compactBelowRoad, headwayShown, iceChargeKw) {
+    _paintHud(cv, lineModes, hero, heroCol, heroUnitCol, subText, subCol, subBolt, gearStr, t, profile, units, fg, brakeLit, brakeHold, alertObj, compactBelowRoad, headwayShown, iceChargeKw) {
         cv.clear(COL.clear); // Borderless 3-line black-outlined text (strictly y=100..200 <= 202 ACC)
-        const compact = Boolean(compactBelowRoad);
         const modes = Array.isArray(lineModes) ? lineModes.slice(0, 3) : ['efficiency_gear', 'power', 'brake'];
-        // When `hud_road` occupies Row 1 (py=0..38), shift compact metrics into Row 2 (py=57, 77, 95) while staying <= py=99!
-        const baselines = compact ? [57, 77, 95] : [35, 65, 92];
+        // Always use one uniform, non-jumping layout below hud_road (py >= 38) and strictly left of hud_headway
+        // (local x <= 144 < 148 on Rows 1-2; Row 3 sits cleanly below hud_headway at py=82..97).
+        const baselines = [56, 72, 95];
         const socStr = (typeof t.soc === 'number' && isFinite(t.soc)) ? ('SOC ' + Math.round(t.soc) + '%') : 'SOC --%';
         const socCol = (typeof t.soc === 'number' && t.soc <= 10) ? COL.red : ((typeof t.soc === 'number' && t.soc <= 20) ? COL.amber : COL.white);
         const oilStr = 'OIL ' + formatTemp(t.oilTempC, units).text;
@@ -1788,104 +1848,126 @@ class OverlayRenderer {
         for (let idx = 0; idx < 3; idx++) {
             const by = baselines[idx];
             const m = modes[idx] || 'off';
+            const rowMaxW = idx <= 1 ? 138 : (cv.w - 12);
             // Never let a passive alert overwrite Line 3 while the driver is actively pressing the brake!
             const hudAlertTxt = alertObj && (alertObj.hudText || alertObj.label);
             if (idx === 2 && hudAlertTxt && !(m === 'brake' && brakeLit > 0)) {
                 const aCol = alertObj.severity === 'red' ? COL.red : COL.amber;
-                const hFit = fitTextLine(cv, hudAlertTxt, cv.w - 10, compact ? [18, 16, 14] : [21, 19, 17], 'bold');
+                const hFit = fitTextLine(cv, hudAlertTxt, cv.w - 10, [16, 15, 14], 'bold');
                 drawTextOutline(cv, hFit.text, 6, by, hFit.size, aCol, { font: 'bold', align: 'left' });
                 continue;
             }
             if (m === 'off') continue;
             if (m === 'efficiency_gear' || m === 'efficiency') {
-                // Fixed non-shifting horizontal anchors wide enough for 2-digit '34.6' without left-edge clipping
-                const valRightX = compact ? 55 : 82;
-                const unitX = compact ? 60 : 88;
-                const gearX = compact ? 116 : 174;
-                const nSize = compact ? (idx === 0 ? 23 : 18) : (idx === 0 ? 36 : 24);
-                const uLong = String(hero.unit || '').length >= 6;
-                const uSize = compact ? (uLong ? 12 : 14) : (uLong ? 15 : (idx === 0 ? 18 : 15));
-                drawTextOutline(cv, hero.value, valRightX, by, nSize, heroCol, { font: 'num', align: 'right' });
-                drawTextOutline(cv, hero.unit, unitX, by - 1, uSize, heroUnitCol || COL.softBlue, { font: 'bold', align: 'left' });
-                if (m === 'efficiency_gear' && gearStr) {
-                    const gSize = compact ? (idx === 0 ? 22 : 18) : (idx === 0 ? 30 : 22);
-                    drawTextOutline(cv, gearStr, gearX, by, gSize, COL.white, { font: 'bold', align: 'left' });
+                const nSize = idx === 0 ? 23 : 17;
+                const uLen = String(hero.unit || '').length;
+                const uSize = uLen >= 8 ? 10 : (uLen >= 6 ? 12 : 14);
+                if (hero.bolt) {
+                    const bH = idx === 0 ? 17 : 13;
+                    const bPad = boltWidth(bH) + 3;
+                    const vW = cv.textWidth(String(hero.value || ''), nSize, { font: 'num' });
+                    const rx = Math.max(55, 6 + bPad + Math.ceil(vW));
+                    drawLightningBolt(cv, Math.max(4, Math.round(rx - vW - bPad)), by - bH + 1, heroCol, bH);
+                    drawTextOutline(cv, hero.value, rx, by, nSize, heroCol, { font: 'num', align: 'right' });
+                    drawTextOutline(cv, hero.unit, rx + 5, by - 1, uSize, heroUnitCol || COL.softBlue, { font: 'bold', align: 'left' });
+                } else {
+                    // Fixed non-shifting horizontal anchors wide enough for 2-digit '34.6' and strictly clear of hud_headway (x < 148)
+                    const valRightX = 55;
+                    const unitX = 59;
+                    const gearX = 113;
+                    drawTextOutline(cv, hero.value, valRightX, by, nSize, heroCol, { font: 'num', align: 'right' });
+                    drawTextOutline(cv, hero.unit, unitX, by - 1, uSize, heroUnitCol || COL.softBlue, { font: 'bold', align: 'left' });
+                    if (m === 'efficiency_gear' && gearStr) {
+                        const gSize = idx === 0 ? 21 : 16;
+                        drawTextOutline(cv, gearStr, gearX, by, gSize, COL.white, { font: 'bold', align: 'left' });
+                    }
                 }
             } else if (m === 'power_gear') {
-                const sz = compact ? (idx === 0 ? 19 : 17) : (idx === 0 ? 26 : (idx === 1 ? 22 : 19));
-                const gx = compact ? 132 : 174;
-                const sFit = fitTextLine(cv, subText, gx - 12, [sz, Math.max(13, sz - 2), Math.max(12, sz - 4)], 'bold');
-                drawTextOutline(cv, sFit.text, 6, by, sFit.size, subCol, { font: 'bold', align: 'left' });
+                const sz = idx === 0 ? 18 : 15;
+                const gx = 113;
+                const bH = 13;
+                const bPad = subBolt ? (boltWidth(bH) + 3) : 0;
+                const sFit = fitTextLine(cv, subText, Math.max(40, gx - 10 - bPad), [sz, Math.max(13, sz - 2), Math.max(11, sz - 4)], 'bold');
+                if (subBolt) {
+                    drawLightningBolt(cv, 6, by - bH + 1, subCol, bH);
+                    drawTextOutline(cv, sFit.text, 6 + bPad, by, sFit.size, subCol, { font: 'bold', align: 'left' });
+                } else {
+                    drawTextOutline(cv, sFit.text, 6, by, sFit.size, subCol, { font: 'bold', align: 'left' });
+                }
                 if (gearStr) {
-                    drawTextOutline(cv, gearStr, gx, by, sz, COL.white, { font: 'bold', align: 'left' });
+                    drawTextOutline(cv, gearStr, gx, by, idx === 0 ? 20 : 16, COL.white, { font: 'bold', align: 'left' });
                 }
             } else if (m === 'power') {
-                const sz = compact ? (idx === 0 ? 19 : 17) : (idx === 0 ? 26 : (idx === 1 ? 22 : 19));
-                const maxSubW = (compact && headwayShown && idx <= 1) ? 138 : (cv.w - 12);
-                const sFit = fitTextLine(cv, subText, maxSubW, [sz, Math.max(14, sz - 2), Math.max(13, sz - 4)], 'bold');
-                drawTextOutline(cv, sFit.text, 6, by, sFit.size, subCol, { font: 'bold', align: 'left' });
+                const sz = idx === 0 ? 18 : 15;
+                const bH = 13;
+                const bPad = subBolt ? (boltWidth(bH) + 3) : 0;
+                const sFit = fitTextLine(cv, subText, Math.max(40, rowMaxW - bPad), [sz, Math.max(13, sz - 1), Math.max(12, sz - 2), Math.max(11, sz - 3)], 'bold');
+                if (subBolt) {
+                    drawLightningBolt(cv, 6, by - bH + 1, subCol, bH);
+                    drawTextOutline(cv, sFit.text, 6 + bPad, by, sFit.size, subCol, { font: 'bold', align: 'left' });
+                } else {
+                    drawTextOutline(cv, sFit.text, 6, by, sFit.size, subCol, { font: 'bold', align: 'left' });
+                }
             } else if (m === 'gear') {
                 if (gearStr) {
-                    const sz = compact ? (idx === 0 ? 22 : 18) : (idx === 0 ? 34 : (idx === 1 ? 24 : 20));
+                    const sz = idx === 0 ? 21 : 16;
                     drawTextOutline(cv, gearStr, 6, by, sz, COL.white, { font: 'bold', align: 'left' });
                 }
             } else if (m === 'soc') {
-                const sz = compact ? (idx === 0 ? 20 : 17) : (idx === 0 ? 28 : (idx === 1 ? 22 : 19));
+                const sz = idx === 0 ? 19 : 16;
                 drawTextOutline(cv, socStr, 6, by, sz, socCol, { font: 'bold', align: 'left' });
             } else if (m === 'soc12') {
                 const s12Str = (typeof t.soc12 === 'number' && isFinite(t.soc12)) ? ('12V ' + Math.round(t.soc12) + '%') : '12V --%';
                 const s12Col = (typeof t.soc12 === 'number' && t.soc12 < 40) ? COL.red : ((typeof t.soc12 === 'number' && t.soc12 < 55) ? COL.amber : COL.white);
-                const sz = compact ? (idx === 0 ? 20 : 17) : (idx === 0 ? 26 : (idx === 1 ? 22 : 19));
+                const sz = idx === 0 ? 19 : 16;
                 drawTextOutline(cv, s12Str, 6, by, sz, s12Col, { font: 'bold', align: 'left' });
             } else if (m === 'headway') {
                 const hp = formatLeadHeadwayParts(t.leadVehicle, units, 'full');
                 if (hp) {
-                    const sz = compact ? 16 : (idx === 0 ? 22 : 19);
                     const hwTxt = hp.primaryStr + (hp.secDistStr ? ('  ' + hp.secDistStr) : '') + (hp.deltaStr ? ('  ' + hp.deltaStr) : '');
-                    drawTextOutline(cv, hwTxt, 6, by, sz, hp.primaryCol, { font: 'bold', align: 'left' });
+                    const hFit = fitTextLine(cv, hwTxt, rowMaxW, [16, 14, 13], 'bold');
+                    drawTextOutline(cv, hFit.text, 6, by, hFit.size, hp.primaryCol, { font: 'bold', align: 'left' });
                 }
             } else if (m === 'soc_oil') {
-                const sz = compact ? 16 : (idx === 0 ? 22 : 19);
-                drawTextOutline(cv, socStr + '  ' + oilStr, 6, by, sz, COL.softBlue, { font: 'bold', align: 'left' });
+                const f = fitTextLine(cv, socStr + '  ' + oilStr, rowMaxW, [16, 14, 13], 'bold');
+                drawTextOutline(cv, f.text, 6, by, f.size, COL.softBlue, { font: 'bold', align: 'left' });
             } else if (m === 'temps') {
-                const sz = compact ? 16 : (idx === 0 ? 22 : 19);
-                drawTextOutline(cv, oilStr + '  ' + coolStr, 6, by, sz, tempCol, { font: 'bold', align: 'left' });
+                const f = fitTextLine(cv, oilStr + '  ' + coolStr, rowMaxW, [16, 14, 13], 'bold');
+                drawTextOutline(cv, f.text, 6, by, f.size, tempCol, { font: 'bold', align: 'left' });
             } else if (m === 'brake') {
+                const hSegs = 12;
+                const stepX = 14;
+                const segH = 6;
+                const segY = by - 9;
                 if (brakeLit > 0) {
-                    const hSegs = compact ? 10 : 12;
-                    const stepX = compact ? 13 : 14;
                     const hLit = brakeHold ? 1 : clamp(Math.round((fg / 0.55) * hSegs), 1, hSegs);
-                    const segH = compact ? 5 : 6;
-                    const segY = compact ? (by - 7) : (by - 11);
+                    // Grow RIGHT-to-LEFT (amber -> orange -> red), matching instrument cluster _paintBrakeRail
                     for (let i = 0; i < hSegs; i++) {
                         const sx = 6 + i * stepX;
-                        const redIdx = compact ? 7 : 8;
-                        const orgIdx = compact ? 3 : 4;
-                        const sc = i < hLit ? (i >= redIdx ? COL.red : (i >= orgIdx ? COL.orange : COL.amber)) : COL.mapRailDim;
+                        const fromRight = hSegs - 1 - i;
+                        const sc = fromRight < hLit
+                            ? (fromRight >= 8 ? COL.red : (fromRight >= 4 ? COL.orange : COL.amber))
+                            : COL.mapRailDim;
                         cv.fillRect(sx - 1, segY - 1, stepX - 1, segH + 2, COL.outline);
                         cv.fillRect(sx, segY, stepX - 3, segH, sc);
                     }
                     if (!brakeHold && fg > 0.02) {
                         const hasBar = typeof t.brakeBar === 'number' && isFinite(t.brakeBar) && t.brakeBar >= 1.5;
                         const bStr = hasBar ? (Math.round(t.brakeBar) + ' bar') : (fg.toFixed(2) + 'g');
-                        drawTextOutline(cv, bStr, 6 + hSegs * stepX + 6, compact ? by : (by - 3), compact ? 14 : 15, fg >= 0.36 ? COL.red : COL.amber, { font: 'bold', align: 'left' });
+                        drawTextOutline(cv, bStr, 6 + hSegs * stepX + 4, by, 14, fg >= 0.36 ? COL.red : COL.amber, { font: 'bold', align: 'left' });
                     }
                 } else if (typeof iceChargeKw === 'number' && isFinite(iceChargeKw) && iceChargeKw > 0) {
-                    const hSegs = compact ? 10 : 12;
-                    const stepX = compact ? 13 : 14;
                     const hChgLit = clamp(Math.round((iceChargeKw / ICE_CHARGE_MAX_KW) * hSegs), 1, hSegs);
-                    const segH = compact ? 5 : 6;
-                    const segY = compact ? (by - 7) : (by - 11);
+                    // Grow LEFT-to-RIGHT in cyan, matching instrument cluster _paintBrakeRail
                     for (let i = 0; i < hSegs; i++) {
                         const sx = 6 + i * stepX;
                         const sc = i < hChgLit ? COL.cyan : COL.mapRailDim;
                         cv.fillRect(sx - 1, segY - 1, stepX - 1, segH + 2, COL.outline);
                         cv.fillRect(sx, segY, stepX - 3, segH, sc);
                     }
-                    const txBaseY = compact ? by : (by - 3);
-                    const boltX = 6 + hSegs * stepX + 4;
-                    drawLightningBolt(cv, boltX, txBaseY - 12, COL.cyan);
-                    drawTextOutline(cv, '+' + iceChargeKw.toFixed(1) + ' kW', boltX + 11, txBaseY, compact ? 14 : 15, COL.cyan, { font: 'bold', align: 'left' });
+                    const boltX = 6 + hSegs * stepX + 3;
+                    drawLightningBolt(cv, boltX, by - 12, COL.cyan, 13);
+                    drawTextOutline(cv, '+' + iceChargeKw.toFixed(1) + ' kW', boltX + 11, by, 14, COL.cyan, { font: 'bold', align: 'left' });
                 }
             }
         }
@@ -1948,7 +2030,10 @@ class OverlayRenderer {
                 const bCol = (fg >= 0.36 || absActive) ? COL.red : COL.amber;
                 drawTextOutline(cv, lbl, rightX - segN * 10 - 6, 20, 16, bCol, { font: 'bold', align: 'right' });
             } else if (mChgLit > 0 && showBrakeNum) {
-                drawTextOutline(cv, '+' + iceChargeKw.toFixed(1) + ' kW', rightX - segN * 10 - 6, 20, 15, COL.cyan, { font: 'bold', align: 'right' });
+                const chgStr = '+' + iceChargeKw.toFixed(1) + ' kW';
+                const txRight = rightX - segN * 10 - 6;
+                const tw = drawTextOutline(cv, chgStr, txRight, 20, 15, COL.cyan, { font: 'bold', align: 'right' });
+                drawLightningBolt(cv, Math.max(2, Math.round(txRight - tw - 11)), 8, COL.cyan, 13);
             }
         }
 

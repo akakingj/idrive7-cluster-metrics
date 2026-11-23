@@ -180,7 +180,8 @@ function inBox(x, y, box) {
         }, { enabled: true, gearDisplay: 'next_to_d' }, t);
         assert.strictEqual(renderer.lastSummary.hero.value, '3.7');
         assert.strictEqual(renderer.lastSummary.hero.unit, 'mi/kWh');
-        assert.strictEqual(renderer.lastSummary.subText, '+1.6 kW');
+        assert.strictEqual(renderer.lastSummary.subText, '1.6 kW');
+        assert.strictEqual(renderer.lastSummary.subBolt, false);
 
         const gasRes = eff.update({ speedKmh: 95, rpm: 1800, engineOn: true, dmeFuelLh: 0.0 }, t + 1000);
         assert.strictEqual(gasRes.isDfco, true);
@@ -1540,27 +1541,27 @@ function inBox(x, y, box) {
         assert.strictEqual(r.lastSummary.rightWidgetPage, 'media');
         assert.strictEqual(r.layers.right_widget.visible, true);
 
-        // Verify non-shifting HUD Line 1 Efficiency + Gear alignment:
-        //   - Changing efficiency value ("3.8" -> "34.6" -> "--") keeps Gear "D5" pixel slice (x=162..220) identical!
-        //   - Changing Stage P (no gear) <-> D5 keeps Efficiency pixel slice (x=0..145) identical!
+        // Verify non-shifting HUD Line 1 Efficiency + Gear alignment (uniform Row-2 band y=38..62):
+        //   - Changing efficiency value ("3.8" -> "12.0" -> "--") keeps Gear "D5" pixel slice (x=110..146) identical!
+        //   - Changing Stage P (no gear) <-> D5 keeps Efficiency pixel slice (x=0..108) identical!
         const grabHudSlice = (cv, x0, x1) => {
             const chunks = [];
-            for (let y = 0; y < 44; y++) chunks.push(Buffer.from(cv.d.slice((y * cv.w + x0) * 4, (y * cv.w + x1) * 4)));
+            for (let y = 38; y < 62; y++) chunks.push(Buffer.from(cv.d.slice((y * cv.w + x0) * 4, (y * cv.w + x1) * 4)));
             return Buffer.concat(chunks);
         };
-        const gearSliceA = grabHudSlice(r.layers.hud_main.cv, 162, 220);
-        const effSliceA = grabHudSlice(r.layers.hud_main.cv, 0, 145);
+        const gearSliceA = grabHudSlice(r.layers.hud_main.cv, 110, 146);
+        const effSliceA = grabHudSlice(r.layers.hud_main.cv, 0, 108);
 
-        model.efficiency.evKmPerKwh = 21.5; // "13.4 mi/kWh" (wider digits)
+        model.efficiency.evKmPerKwh = 21.5; // "12.0 mi/kWh" (wider digits)
         r.render(model, { enabled: true, hudLine1: 'efficiency_gear', hudLine2: 'power', hudLine3: 'brake' }, 12050);
-        assert.strictEqual(Buffer.compare(gearSliceA, grabHudSlice(r.layers.hud_main.cv, 162, 220)), 0,
+        assert.strictEqual(Buffer.compare(gearSliceA, grabHudSlice(r.layers.hud_main.cv, 110, 146)), 0,
             'Gear D5 on HUD Row 1 must NOT shift when efficiency changes width');
 
         model.efficiency.evKmPerKwh = 6.1;
         model.telemetry.stage = 'P';
         model.telemetry.gear = null;
         r.render(model, { enabled: true, hudLine1: 'efficiency_gear', hudLine2: 'power', hudLine3: 'brake' }, 12100);
-        assert.strictEqual(Buffer.compare(effSliceA, grabHudSlice(r.layers.hud_main.cv, 0, 145)), 0,
+        assert.strictEqual(Buffer.compare(effSliceA, grabHudSlice(r.layers.hud_main.cv, 0, 108)), 0,
             'Efficiency on HUD Row 1 must NOT shift when Gear disappears in Park');
         model.telemetry.stage = 'D';
         model.telemetry.gear = 5;
@@ -1707,7 +1708,8 @@ function inBox(x, y, box) {
         assert.strictEqual(r.lastSummary.isCharging, true);
         assert.strictEqual(r.lastSummary.rightWidgetPage, 'charging', 'charging widget must auto-activate and cannot be turned off while charging');
         assert.strictEqual(r.layers.right_widget.visible, true);
-        assert.strictEqual(r.lastSummary.hero.value, '3.5', 'below_speed must replace -- mi/kWh with charging speed kW');
+        assert.strictEqual(r.lastSummary.hero.value, '+3.5', 'below_speed must replace -- mi/kWh with charging speed +kW');
+        assert.strictEqual(r.lastSummary.hero.bolt, true, 'charging speed hero must display lightning bolt');
         assert.strictEqual(r.lastSummary.hero.unit, 'kW');
         assert.strictEqual(r.lastSummary.subText, 'CHARGING 16A');
 
@@ -1729,8 +1731,10 @@ function inBox(x, y, box) {
         assert.strictEqual(decodeStatusBattery2({ conditionBatteryChargingCondition: 0 }), 0);
         assert.strictEqual(decodeStatusBattery2({ conditionBatteryChargingCondition: 255 }), null, '255 invalid must return null');
 
-        assert.strictEqual(decodeCabinTemp({ temperatureInside: 124 }), 22.0); // 124 * 0.5 - 40 = 22.0C (72F)
-        assert.strictEqual(decodeCabinTemp({ temperatureInside: 80 }), 0.0);
+        assert.strictEqual(decodeCabinTemp({ temperatureInside: 160 }), 22.0); // 160 * 0.1 + 6.0 = 22.0C (72F)
+        assert.strictEqual(decodeCabinTemp({ temperatureInside: 146 }), 20.6); // Real G30 road-test raw=146 -> 20.6C (69F)
+        assert.strictEqual(decodeCabinTemp({ temperatureInside: 154 }), 21.4); // Real G30 road-test raw=154 -> 21.4C (71F)
+        assert.strictEqual(decodeCabinTemp({ temperatureInside: 0 }), 6.0);
         assert.strictEqual(decodeCabinTemp({ temperatureInside: 255 }), null, '255 invalid must return null');
 
         const lt = new LeadVehicleTracker();
@@ -2558,7 +2562,7 @@ function inBox(x, y, box) {
                 },
             },
         }, { enabled: true, widgetMedia: true }, 5200);
-        assert.strictEqual(r.lastSummary.subText, '2140 RPM  +5.1 PSI', 'Warm gas mode must show Live RPM + Turbo Boost PSI');
+        assert.strictEqual(r.lastSummary.subText, '2143 RPM  +5.1 PSI', 'Warm gas mode must show raw Live RPM + Turbo Boost PSI');
         assert.strictEqual(r.lastSummary.subCol, '#f2f5fa', 'Warm gas mode Line 2 must stay white');
 
         // Check '/' forward-slash right end of cyan progress fill bar at barY=418 (top row y=418 vs bottom row y=429)
@@ -2742,6 +2746,165 @@ function inBox(x, y, box) {
         r.render(baseModel, { enabled: true, brakeIndicator: 'bar_num', iceChargeBar: false }, 11000);
         assert.strictEqual(r.lastSummary.iceChargeActive, false);
         assert.strictEqual(r.lastSummary.iceChargeLit, 0);
+    });
+
+    /* 26. Road-Test Feedback Fixes: Raw Telemetry (No Smoothing), Uniform HUD & Zero Headway Overlap, Right-to-Left HUD Brake, Bolt/+ Consistency, Cabin Temp & Bold/Tall Lane Arrows */
+    await test('Road-test fixes: zero telemetry smoothing, uniform non-overlapping HUD, R->L HUD brake, bolt/+ power, IHKA cabin temp & bold tall lane arrows', () => {
+        // 1. Zero smoothing: immediate step response for EV eff, fuel eff, injection flow, and ICE charging kW
+        const et = new EfficiencyTracker();
+        let res = et.update({ speedKmh: 72, rpm: 0, engineOn: false, hvKw: 12.0 }, 1000);
+        assert(Math.abs(res.evKmPerKwh - 6.0) < 0.01, 'instant EV eff must read 6.0 km/kWh on first moving sample');
+        res = et.update({ speedKmh: 72, rpm: 0, engineOn: false, hvKw: 24.0 }, 1200);
+        assert(Math.abs(res.evKmPerKwh - 3.0) < 0.01, 'step change 12->24 kW must jump immediately to 3.0 km/kWh with zero smoothing');
+        res = et.update({ speedKmh: 0, rpm: 0, engineOn: false, hvKw: 1.2 }, 1500);
+        assert(Math.abs(res.evKmPerKwh - 3.0) < 0.01, 'stopping at 0 mph must hold last moving EV efficiency');
+
+        res = et.update({ speedKmh: 64.37, rpm: 1800, engineOn: true, dmeFuelLh: 4.30 }, 2000);
+        const l100A = (4.30 / 64.37) * 100;
+        assert(Math.abs(res.fuelLPer100km - l100A) < 0.05, 'instant fuel eff must match raw DME L/h immediately');
+        res = et.update({ speedKmh: 64.37, rpm: 2400, engineOn: true, dmeFuelLh: 8.60 }, 2200);
+        assert(Math.abs(res.fuelLPer100km - l100A * 2) < 0.05, 'step change in fuel rate must respond 100% immediately with zero lag');
+
+        const iceSt = {};
+        let c1 = computeIceBatteryCharge({ speedKmh: 90, rpm: 1800, engineOn: true, hvKw: -4.2, pedalPct: 20, torqueNm: 120 }, iceSt, 1000);
+        assert(Math.abs(c1.chargeKw - 4.2) < 0.01);
+        let c2 = computeIceBatteryCharge({ speedKmh: 90, rpm: 2100, engineOn: true, hvKw: -11.4, pedalPct: 35, torqueNm: 180 }, iceSt, 1200);
+        assert(Math.abs(c2.chargeKw - 11.4) < 0.01, 'ICE charging kW must jump immediately from 4.2 to raw 11.4 kW (zero EMA lag), got ' + c2.chargeKw);
+
+        // 2. Uniform HUD font/layout across nav & headway states + ZERO overlap with hud_headway
+        const r = new OverlayRenderer({ allowPanel: true });
+        const navRoad = {
+            routeActive: true, guide: 'BMW', hasLanes: false, miniMapActive: false, wocHudShowing: false,
+            show: { kind: 'turn', dir: 'RIGHT', dist: '0.4', unit: 'mi', exitBadge: '14B', road: 'I-280 North' },
+        };
+        const leadOn = { active: true, gapM: 32.0, headwaySec: 1.3, relSpeedKmh: -9.0, status: 'ok' };
+        const makeHudModel = (withRoad, withLead, isEv, hvKw, frictionG, brakeBar) => ({
+            units: unitsMod.US_PRESET,
+            profile: isEv
+                ? { vehicleType: 'phev', engineOn: false, mode: hvKw < -0.5 ? 'ev_regen' : 'ev_drive', isEv: true, isCold: false, coldCeilingRpm: null, alert: null }
+                : { vehicleType: 'phev', engineOn: true, mode: 'gas_warm', isEv: false, isCold: false, coldCeilingRpm: null, alert: null },
+            efficiency: { evKmPerKwh: 6.1, fuelLPer100km: 7.4, isDfco: false },
+            telemetry: {
+                speedKmh: 96, rpm: isEv ? 0 : 2143, boostBar: 0.35, hvKw, soc: 45, soc12: 88,
+                oilTempC: 92, coolantTempC: 90, pedalPct: 22, torqueNm: 140,
+                stage: 'D', program: 'D', gear: 7, frictionG: frictionG || 0, brakeBar: brakeBar || 0,
+                leadVehicle: withLead ? leadOn : { active: false },
+                hudNav: withRoad ? navRoad : { routeActive: false, show: null },
+            },
+        });
+        const hudOpts = { enabled: true, hudNavMode: 'own_nav_minimap', hudHeadway: 'full', hudLine1: 'efficiency_gear', hudLine2: 'power', hudLine3: 'brake' };
+
+        r.render(makeHudModel(false, false, false, 0, 0, 0), hudOpts, 1000);
+        const hudBufNoNavNoLead = Buffer.from(r.layers.hud_main.cv.d);
+        r.render(makeHudModel(false, true, false, 0, 0, 0), hudOpts, 1100);
+        const hudBufNoNavWithLead = Buffer.from(r.layers.hud_main.cv.d);
+        const hwRect = r.layers.hud_headway.rect;
+        r.render(makeHudModel(true, false, false, 0, 0, 0), hudOpts, 1200);
+        const hudBufNavNoLead = Buffer.from(r.layers.hud_main.cv.d);
+        r.render(makeHudModel(true, true, false, 0, 0, 0), hudOpts, 1300);
+        const hudBufNavWithLead = Buffer.from(r.layers.hud_main.cv.d);
+
+        assert.strictEqual(Buffer.compare(hudBufNoNavNoLead, hudBufNoNavWithLead), 0, 'hud_main must stay pixel-identical when lead vehicle appears (zero font jump)');
+        assert.strictEqual(Buffer.compare(hudBufNoNavNoLead, hudBufNavNoLead), 0, 'hud_main must stay pixel-identical when hud_road appears (zero font jump)');
+        assert.strictEqual(Buffer.compare(hudBufNoNavNoLead, hudBufNavWithLead), 0, 'hud_main must stay pixel-identical with both hud_road and hud_headway');
+
+        // Verify ZERO painted hud_main pixels fall inside hud_headway bounding box in world space!
+        const hudRect = r.layers.hud_main.rect;
+        let hwOverlapPx = 0;
+        for (let py = 0; py < hudRect.h; py++) {
+            const wy = hudRect.y + py;
+            if (wy < hwRect.y || wy >= hwRect.y + hwRect.h) continue;
+            for (let px = 0; px < hudRect.w; px++) {
+                const wx = hudRect.x + px;
+                if (wx < hwRect.x || wx >= hwRect.x + hwRect.w) continue;
+                if (hudBufNavWithLead[(py * hudRect.w + px) * 4 + 3] > 0) hwOverlapPx++;
+            }
+        }
+        assert.strictEqual(hwOverlapPx, 0, 'hud_main must have 0 pixels overlapping hud_headway, got ' + hwOverlapPx);
+
+        // 3. HUD brake meter grows RIGHT-to-LEFT while HUD ICE charging grows LEFT-to-RIGHT
+        r.render(makeHudModel(false, false, false, 0, 0.14, 12), hudOpts, 2000); // ~3/12 brake segments
+        const hCv = r.layers.hud_main.cv;
+        const leftSegX = 10;                  // i=0 (leftmost segment center)
+        const rightSegX = 6 + 11 * 14 + 4;    // i=11 (rightmost segment center)
+        const segMidY = 89;
+        const leftOff = (segMidY * hCv.w + leftSegX) * 4;
+        const rightOff = (segMidY * hCv.w + rightSegX) * 4;
+        assert(hCv.d[rightOff] > 220 && hCv.d[rightOff + 3] === 255, 'HUD brake light pressure must light RIGHTMOST segment amber');
+        assert(hCv.d[leftOff] < 80 && hCv.d[leftOff + 1] < 90, 'HUD brake light pressure must leave LEFTMOST segment dim (right-to-left growth)');
+
+        r.render(makeHudModel(false, false, false, -5.0, 0, 0), hudOpts, 2200); // ~4/12 ICE charge segments
+        assert(hCv.d[leftOff + 1] > 180 && hCv.d[leftOff + 2] > 240 && hCv.d[leftOff + 3] === 255, 'HUD ICE charge must light LEFTMOST segment cyan');
+        assert(hCv.d[rightOff + 1] < 90 && hCv.d[rightOff + 2] < 130, 'HUD ICE charge must leave RIGHTMOST segment dim (left-to-right growth)');
+
+        // 4. Consumption has NO '+' sign; Charging/Regen consistently shows bolt + '+' everywhere
+        assert.strictEqual(unitsMod.formatPowerKw(12.4).text, '12.4 kW');
+        assert.strictEqual(unitsMod.formatPowerKw(12.4).charging, false);
+        assert.strictEqual(unitsMod.formatPowerKw(0.0).text, '0.0 kW');
+        assert.strictEqual(unitsMod.formatPowerKw(-18.5).text, '+18.5 kW');
+        assert.strictEqual(unitsMod.formatPowerKw(-18.5).charging, true);
+
+        r.render(makeHudModel(false, false, true, 12.4, 0, 0), hudOpts, 2400);
+        assert.strictEqual(r.lastSummary.subText, '12.4 kW');
+        assert.strictEqual(r.lastSummary.subBolt, false);
+
+        r.render(makeHudModel(false, false, true, -18.5, 0, 0), hudOpts, 2600);
+        assert.strictEqual(r.lastSummary.subText, '+18.5 kW');
+        assert.strictEqual(r.lastSummary.subBolt, true);
+        // Verify cyan bolt pixels exist left of '+18.5 kW' on HUD Line 2 (x=6..14, y=60..72)
+        let hudRegenBoltPx = 0;
+        for (let py = 60; py <= 72; py++) {
+            for (let px = 6; px <= 14; px++) {
+                const o = (py * hCv.w + px) * 4;
+                if (hCv.d[o + 1] > 180 && hCv.d[o + 2] > 240 && hCv.d[o + 3] === 255) hudRegenBoltPx++;
+            }
+        }
+        assert(hudRegenBoltPx >= 20, 'EV regen on HUD Line 2 must draw cyan lightning bolt before +18.5 kW, got ' + hudRegenBoltPx);
+
+        // 5. Bold, full-height HUD lane guidance arrows (turning height matches straight; straight stem >= 7px wide)
+        const { drawHudNav, NW, NH } = require(path.join(APP_DIR, 'hud_nav_renderer'));
+        const { Canvas } = require('./kit/canvas');
+        const laneCv = new Canvas(NW, NH);
+        drawHudNav(laneCv, {
+            kind: 'turn', dir: 'RIGHT', dist: '500', unit: 'ft', road: '',
+            lanes: {
+                lanes: [
+                    { follows: ['LEFT'], others: [], hi: true, info: 'NONE' },
+                    { follows: ['STRAIGHT_ON'], others: [], hi: true, info: 'NONE' },
+                    { follows: ['STRAIGHT_ON', 'RIGHT'], others: [], hi: true, info: 'NONE' },
+                    { follows: ['RIGHT'], others: [], hi: true, info: 'NONE' },
+                ],
+                markers: ['SOLID', 'DASHED', 'DASHED', 'DASHED', 'SOLID'],
+                rec: 3,
+            },
+        }, { hideRoad: true });
+        // 4 lanes * 40px = 160px centered in 264px -> x = 52..212 (Lane 0: 52..92, Lane 1: 92..132, Lane 3: 172..212), cy = 194 (y = 169..219)
+        const spanY = (x0, x1) => {
+            let lo = 999, hi = -1;
+            for (let y = 166; y <= 220; y++) {
+                for (let x = x0; x <= x1; x++) {
+                    const o = (y * NW + x) * 4;
+                    if (laneCv.d[o] > 200 && laneCv.d[o + 1] > 200 && laneCv.d[o + 2] > 200 && laneCv.d[o + 3] > 200) {
+                        if (y < lo) lo = y;
+                        if (y > hi) hi = y;
+                    }
+                }
+            }
+            return hi - lo + 1;
+        };
+        const leftTurnH = spanY(56, 88);
+        const straightH = spanY(96, 128);
+        const rightTurnH = spanY(176, 208);
+        assert(leftTurnH >= 36 && rightTurnH >= 36,
+            'Turning lane arrows must be tall (>=36px, not stubby 14px), got left=' + leftTurnH + ', right=' + rightTurnH + ', straight=' + straightH);
+
+        // Straight arrow stem thickness at y = 204 (mid-stem well below arrowhead) in Lane 1 (x = 96..128)
+        let stemWidthPx = 0;
+        for (let x = 96; x <= 128; x++) {
+            const o = (204 * NW + x) * 4;
+            if (laneCv.d[o] > 200 && laneCv.d[o + 3] > 200) stemWidthPx++;
+        }
+        assert(stemWidthPx >= 7, 'Straight lane arrow stem must be bold (>=7px wide), got ' + stemWidthPx + 'px');
     });
 
     console.log('\nAll ' + passed + ' tests passed.');

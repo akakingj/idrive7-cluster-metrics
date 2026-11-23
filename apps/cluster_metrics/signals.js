@@ -265,13 +265,13 @@ function decodeStatusBattery2(v) {
 
 /**
  * Decode interior cabin temperature from `Climate2.statusTemperatureInside`.
- * `temperatureInside` is UInt8 (0..250 -> raw * 0.5 - 40 degC, 255 = invalid).
+ * BMW IHKA `0x32E` Byte 3 (`UInt8`, 0..250 -> `raw * 0.1 + 6.0` degC = +6.0..+31.0 degC, 255 = invalid).
  */
 function decodeCabinTemp(v) {
     const raw = (v && typeof v === 'object') ? v.temperatureInside : v;
     if (typeof raw !== 'number' || !isFinite(raw) || raw < 0 || raw >= 251) return null;
-    const tempC = raw * 0.5 - 40;
-    return (tempC >= -40 && tempC <= 85) ? tempC : null;
+    const tempC = Math.round((raw * 0.1 + 6.0) * 10) / 10;
+    return (tempC >= 6.0 && tempC <= 31.0) ? tempC : null;
 }
 
 function collectEntries(v, key, out) {
@@ -1151,8 +1151,7 @@ function computeIceBatteryCharge(raw, state, nowMs) {
     const now = typeof nowMs === 'number' && isFinite(nowMs) ? nowMs : Date.now();
     const clear = () => {
         st.active = false;
-        st.smoothKw = null;
-        st.smoothMs = 0;
+        st.lastKw = null;
         st.lastValidMs = 0;
         return { active: false, chargeKw: 0, rawKw: 0 };
     };
@@ -1204,24 +1203,16 @@ function computeIceBatteryCharge(raw, state, nowMs) {
     const validNow = combustionPropelling && inKw >= minKw;
 
     if (validNow) {
-        if (typeof st.smoothKw !== 'number' || !isFinite(st.smoothKw) || !st.smoothMs || now - st.smoothMs > 8000) {
-            st.smoothKw = inKw;
-        } else {
-            const dtS = Math.max(0.05, Math.min(3.0, (now - st.smoothMs) / 1000));
-            const alpha = dtS / (0.9 + dtS);
-            st.smoothKw += (inKw - st.smoothKw) * alpha;
-        }
-        st.smoothMs = now;
+        const clamped = Math.max(0.5, Math.min(30.0, inKw));
+        st.lastKw = clamped;
         st.lastValidMs = now;
         st.active = true;
-        const clamped = Math.max(0.5, Math.min(30.0, st.smoothKw));
         return { active: true, chargeKw: clamped, rawKw: inKw };
     }
 
     // Bridge brief (< 650 ms) ZF 8HP upshift torque/current dips while ICE stays running & unbraked
-    if (st.active && st.lastValidMs > 0 && now - st.lastValidMs <= 650 && typeof st.smoothKw === 'number') {
-        const clampedHold = Math.max(0.5, Math.min(30.0, st.smoothKw));
-        return { active: true, chargeKw: clampedHold, rawKw: inKw };
+    if (st.active && st.lastValidMs > 0 && now - st.lastValidMs <= 650 && typeof st.lastKw === 'number') {
+        return { active: true, chargeKw: st.lastKw, rawKw: inKw };
     }
 
     return clear();
@@ -2861,14 +2852,30 @@ class SignalHub {
         }, 260);
         this.timers.push(dscTimer);
 
-        // Fast SME HV voltage/current loop (~420 ms)
+        // Fast SME HV voltage/current loop (~420 ms) + fallback DME fuelRate (~840 ms) when ICE runs without SOME/IP injection counter
+        let fastTick = 0;
+        let lastFastFuelMs = 0;
         const fastTimer = setInterval(async () => {
-            if (this.stopped || !isEnabled() || !this._demand.hvUds || this.isDemoActive() || this.live.carLocked) return;
-            if (fastBusy || (this.ipc.active && typeof this.ipc.kw === 'number')) return;
-            if (checkSmeSilence()) return;
+            if (this.stopped || !isEnabled() || this.isDemoActive() || this.live.carLocked) return;
+            if (fastBusy) return;
+            fastTick++;
+            const wantSmeFast = this._demand.hvUds && !(this.ipc.active && typeof this.ipc.kw === 'number') && !checkSmeSilence();
+            const rpmFast = this.live.rpm || 0;
+            const injLiveFast = this.live.injVolumeT && (Date.now() - this.live.injVolumeT) < 3000;
+            const wantDmeFast = (fastTick % 2 === 0) && rpmFast >= 350 && !injLiveFast && !link.silent(dmeCfg.ecu || 18);
+            if (!wantSmeFast && !wantDmeFast) return;
             fastBusy = true;
             try {
-                await readSmePower();
+                if (wantSmeFast) await readSmePower();
+                if (wantDmeFast) {
+                    await exclusive(async () => {
+                        const frVal = await this.readers.dme.value('fuelRate', dmeCfg.fuelRate || []);
+                        if (typeof frVal === 'number') {
+                            this.live.dmeFuelLh = frVal;
+                            lastFastFuelMs = Date.now();
+                        }
+                    }, false);
+                }
             } catch (e) {
                 this.log.warn('uds fast: ' + (e.message || e));
             } finally {
@@ -2877,7 +2884,7 @@ class SignalHub {
         }, 420);
         this.timers.push(fastTimer);
 
-        // Slow round-robin UDS loop for SoC %, CellTemp, DME fuelRate (throttled to 10s once SOME/IP injection counter calibrates!), 12V, IAT, Gearbox oil
+        // Slow round-robin UDS loop for SoC %, CellTemp, DME fuelRate (calibration / backup), 12V, IAT, Gearbox oil
         let dmeWasRunning = false;
         let dmeFuelCalibReads = 0;
         const slowTimer = setInterval(async () => {
@@ -2900,7 +2907,8 @@ class SignalHub {
                         }
                     }
                     const injLive = this.live.injVolumeT && (Date.now() - this.live.injVolumeT) < 3000;
-                    const wantFuelUds = !injLive || dmeFuelCalibReads < 5 || (slowTick % 4 === 0);
+                    const fastFresh = (Date.now() - lastFastFuelMs) < 1500;
+                    const wantFuelUds = !fastFresh && (!injLive || dmeFuelCalibReads < 5 || (slowTick % 4 === 0));
                     if (!link.silent(dmeCfg.ecu || 18) && (wantFuelUds || this.live.oilTempC === undefined)) {
                         await exclusive(async () => {
                             if (wantFuelUds) {

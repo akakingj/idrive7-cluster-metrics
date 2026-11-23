@@ -541,7 +541,9 @@ mgu.run({
             );
 
             const socStr = (typeof t.soc === 'number' && isFinite(t.soc)) ? (t.soc.toFixed(1) + '%') : '--';
-            const kwStr = (typeof t.hvKw === 'number' && isFinite(t.hvKw)) ? ((t.hvKw >= 0 ? '+' : '') + t.hvKw.toFixed(1) + ' kW') : '--';
+            const kwStr = (typeof t.hvKw === 'number' && isFinite(t.hvKw))
+                ? (t.hvKw < -0.05 ? ('+' + Math.abs(t.hvKw).toFixed(1) + ' kW CHG') : (Math.abs(t.hvKw).toFixed(1) + ' kW'))
+                : '--';
             const erangeStr = (typeof t.erangeKm === 'number' && isFinite(t.erangeKm))
                 ? (units.distUnit === 'mi' ? Math.round(t.erangeKm * 0.621371) + ' mi' : Math.round(t.erangeKm) + ' km')
                 : '--';
