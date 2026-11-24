@@ -1,6 +1,6 @@
 'use strict';
 /**
- * main.js - Cluster Metrics entry point for BMW iDrive 7 (MGU OAP).
+ * main.js - Cluster+ entry point for BMW iDrive 7 (MGU OAP).
  *
  * Uses BMW's native full-screen-width RHMI list (`LT_State_Wide`):
  *   - MAIN: native switches, dropdowns, live status summary, and a button to open Diagnostics.

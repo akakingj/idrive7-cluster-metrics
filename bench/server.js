@@ -1,6 +1,6 @@
 'use strict';
 /**
- * bench/server.js - Local desktop preview server for idrive7-cluster-metrics.
+ * bench/server.js - Local desktop preview server for idrive7-cluster-plus (Cluster+).
  * Emulates the cluster-render Unix socket protocol and streams RGBA layers to bench/ui.html over SSE.
  *
  *   node bench/server.js

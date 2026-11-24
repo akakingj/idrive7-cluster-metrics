@@ -1,7 +1,7 @@
 {
   "id": "cluster_metrics",
-  "title": "Cluster Metrics",
-  "description": "Real-time efficiency, HV battery %, powertrain temperatures, gear in D, full-wing Right-Wing Media/Charging/Trip/TPMS & Alerts widget, HUD turn-by-turn nav, and live DSC hydraulic brake indicator for BMW iDrive 7",
+  "title": "Cluster+",
+  "description": "Stock+ instrument cluster & HUD overlay for BMW iDrive 7: live efficiency & power, active gear, cabin & powertrain temps, HV battery %, hydraulic brake & charging bars, Media/Trip/TPMS/Charging widgets, and HUD navigation",
   "version": "0.9.3",
   "autostart": true,
   "license": "GPL-3.0-only",
@@ -15,7 +15,7 @@
     "jpeg_decoder.js": "jpeg-js/lib/decoder.js"
   },
   "bundleNotices": [
-    "Cluster Metrics - GNU General Public License v3.0 (GPL-3.0, see LICENSE).",
+    "Cluster+ - GNU General Public License v3.0 (GPL-3.0, see LICENSE).",
     "Copyright (c) 2026 chyiz (https://github.com/chyiz)",
     "",
     "Bundled runtime dependencies retain their upstream licenses:",
@@ -241,14 +241,14 @@
     {
       "name": "MAIN",
       "kind": "menu",
-      "title": "Cluster Metrics",
+      "title": "Cluster+",
       "settings": false,
       "repoLink": false,
       "items": [
         [
           "tworow",
           "STATUS_SUMMARY",
-          "Cluster Metrics Status"
+          "Cluster+ Status"
         ],
         [
           "tworow",
@@ -469,7 +469,7 @@
   "settings": [
     {
       "key": "enabled",
-      "label": "Enable cluster & HUD metrics",
+      "label": "Enable Cluster+",
       "type": "bool",
       "default": true
     },
@@ -502,11 +502,11 @@
       "options": [
         [
           "panel_only",
-          "Full Cluster Panel (all zones + right widget)"
+          "Full Cluster (all overlays + right widgets)"
         ],
         [
           "map_only",
-          "Map Slot Only (over CarPlay/AA map; stock BC)"
+          "Center Map Area Only (keeps stock BC widgets)"
         ]
       ]
     },
@@ -582,7 +582,7 @@
       "options": [
         [
           "efficiency_gear",
-          "Efficiency + Gear (fixed slots)"
+          "Efficiency + Gear"
         ],
         [
           "efficiency",
@@ -627,7 +627,7 @@
       "options": [
         [
           "power",
-          "Power / Boost only"
+          "Power / RPM & Boost"
         ],
         [
           "power_gear",
@@ -764,7 +764,7 @@
       "options": [
         [
           "oil_cool",
-          "Oil + Coolant (always)"
+          "Oil + Coolant"
         ],
         [
           "oil_gbx",
@@ -800,7 +800,7 @@
       "options": [
         [
           "power",
-          "Power kW / Live RPM & Boost"
+          "Power / RPM & Boost"
         ],
         [
           "off",

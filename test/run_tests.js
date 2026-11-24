@@ -1,6 +1,6 @@
 'use strict';
 /**
- * test/run_tests.js - Automated verification suite for idrive7-cluster-metrics.
+ * test/run_tests.js - Automated verification suite for idrive7-cluster-plus (Cluster+).
  */
 
 const assert = require('assert');
